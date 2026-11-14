@@ -1,0 +1,38 @@
+{
+  "schemaVersion": 1,
+  "id": "ctrlz",
+  "version": "${version}",
+  "name": "CtrlZ Activity Rollback",
+  "description": "Records player activities with causal consequence tracking and supports transactional per-activity rollback.",
+  "authors": [
+    "CtrlZ"
+  ],
+  "contact": {},
+  "license": "MIT",
+  "icon": "assets/ctrlz/icon.png",
+  "environment": "*",
+  "entrypoints": {
+    "main": [
+      "com.ctrlz.CtrlZMod"
+    ],
+    "client": [
+      "com.ctrlz.client.CtrlZClient"
+    ]
+  },
+  "mixins": [
+    "ctrlz.mixins.json",
+    {
+      "config": "ctrlz.client.mixins.json",
+      "environment": "client"
+    }
+  ],
+  "depends": {
+    "fabricloader": ">=0.19.3",
+    "minecraft": "~26.1.2",
+    "java": ">=25",
+    "fabric-api": "*"
+  },
+  "recommends": {
+    "minetracer": "*"
+  }
+}

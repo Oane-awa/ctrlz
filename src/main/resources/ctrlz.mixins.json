@@ -1,0 +1,16 @@
+{
+  "required": true,
+  "package": "com.ctrlz.mixin",
+  "compatibilityLevel": "JAVA_21",
+  "mixins": [
+    "LevelMixin",
+    "ContainerMenuMixin",
+    "ServerPlayerMixin",
+    "PlayerMixin",
+    "ItemEntityMixin",
+    "LivingEntityMixin"
+  ],
+  "injectors": {
+    "defaultRequire": 1
+  }
+}
