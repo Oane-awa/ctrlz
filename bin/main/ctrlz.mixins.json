@@ -6,6 +6,7 @@
     "LevelMixin",
     "ContainerMenuMixin",
     "ServerPlayerMixin",
+    "ServerLevelMixin",
     "PlayerMixin",
     "ItemEntityMixin",
     "LivingEntityMixin"

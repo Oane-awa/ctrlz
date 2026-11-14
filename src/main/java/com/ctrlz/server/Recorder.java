@@ -52,22 +52,11 @@ public final class Recorder {
 		if (activity == null) {
 			return;
 		}
-		String dimension = dimensionOf(level);
-		long packed = ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ());
-		String before = Snapshots.encodeBlockState(oldState);
-		BlockState current = level.getBlockState(pos);
-		String after = Snapshots.encodeBlockState(current);
-		// The block entity payload is recorded first on purpose: rollback replays consequences in
-		// reverse order, so the block must be restored before its stored inventory is loaded.
-		byte[] beforeBe = hub.config().captureBlockEntityData ? Snapshots.blockEntityData(level, pos) : new byte[0];
-		if (beforeBe.length > 0) {
-			hub.consequence(activity, ConsequenceKind.BLOCK_ENTITY_DATA, ConsequenceOrigin.DIRECT, dimension, packed,
-					BuiltInRegistries.BLOCK.getKey(oldState.getBlock()).toString() + "#be", beforeBe, new byte[0],
-					"block entity data", 0L);
-		}
-		hub.consequence(activity, ConsequenceKind.BLOCK_STATE, ConsequenceOrigin.DIRECT, dimension, packed,
-				BuiltInRegistries.BLOCK.getKey(oldState.getBlock()).toString(), before.getBytes(StandardCharsets.UTF_8),
-				after.getBytes(StandardCharsets.UTF_8), before + " -> " + after, 0L);
+		// This event fires BEFORE the block is removed, so the world still shows the old state here.
+		// The real before/after pair (and the block entity data) is captured by the setBlock hook;
+		// this handler only opens the activity and marks the position, which is what lets that hook
+		// attribute the change, the drops and any redstone reaction to this activity.
+		hub.touch(activity, dimensionOf(level), ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ()));
 		hub.addStat(activity, ActivityStat.BLOCKS_BROKEN, 1);
 	}
 
@@ -80,17 +69,26 @@ public final class Recorder {
 		if (activity == null) {
 			return;
 		}
+		hub.touch(activity, dimensionOf((ServerLevel) player.level()),
+				ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ()));
 		hub.addStat(activity, ActivityStat.BLOCKS_PLACED, 1);
 	}
 
-	public static void onItemUsed(ServerPlayer player, ItemStack stack) {
+	/** Using an item or block (doors, levers, buttons, chests...) with the clicked position. */
+	public static void onItemUsed(ServerPlayer player, ItemStack stack, BlockPos pos) {
 		if (!active() || !CtrlZServer.get().config().recordUseItem) {
 			return;
 		}
 		CtrlZServer hub = CtrlZServer.get();
 		ActivityRecord activity = hub.openAction(player, ActivityKind.USE_ITEM);
-		if (activity != null) {
+		if (activity != null && pos != null) {
+			hub.touch(activity, dimensionOf((ServerLevel) player.level()),
+					ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ()));
 		}
+	}
+
+	public static void onItemUsed(ServerPlayer player, ItemStack stack) {
+		onItemUsed(player, stack, null);
 	}
 
 	public static void onContainerOpened(ServerPlayer player) {
@@ -108,11 +106,8 @@ public final class Recorder {
 		if (!active()) {
 			return;
 		}
-		CtrlZServer hub = CtrlZServer.get();
-		ActivityRecord activity = hub.openAction(player, ActivityKind.JUMP);
-		if (activity != null) {
-			hub.addStat(activity, ActivityStat.JUMPS, 1);
-		}
+		// A jump belongs to the walk it happens in; it is a counter on the movement activity.
+		CtrlZServer.get().recordJump(player);
 	}
 
 	static boolean isBlockItem(ItemStack stack) {
@@ -184,7 +179,8 @@ public final class Recorder {
 				after.getBytes(StandardCharsets.UTF_8), "health " + before + " -> " + after, 0L);
 	}
 
-	public static void onItemDropped(ServerPlayer player, ItemStack stack) {
+	/** A player threw an item: the inventory slot change is picked up by the tick diff, the entity here. */
+	public static void onItemDropped(ServerPlayer player, ItemStack stack, Entity itemEntity) {
 		if (!active() || !CtrlZServer.get().config().recordItemDrop || stack.isEmpty()) {
 			return;
 		}
@@ -194,6 +190,15 @@ public final class Recorder {
 			return;
 		}
 		hub.addStat(activity, ActivityStat.ITEMS_DROPPED, stack.getCount());
+		ServerLevel level = levelOf(player);
+		if (level != null && itemEntity instanceof net.minecraft.world.entity.item.ItemEntity dropped) {
+			long packed = ByteIO.packBlockPos(dropped.blockPosition().getX(), dropped.blockPosition().getY(),
+					dropped.blockPosition().getZ());
+			hub.consequence(activity, ConsequenceKind.ITEM_ENTITY_SPAWN, ConsequenceOrigin.DIRECT,
+					dimensionOf(level), packed, dropped.getStringUUID(), new byte[0],
+					Snapshots.encodeSingleItem(dropped.getItem(), level.registryAccess()),
+					"dropped " + Snapshots.describe(dropped.getItem()), 0L);
+		}
 	}
 
 	public static void onItemPickedUp(ServerPlayer player, Entity itemEntity, ItemStack stack) {
@@ -219,6 +224,9 @@ public final class Recorder {
 				packed, itemEntity.getStringUUID(),
 				Snapshots.encodeSingleItem(stack, level.registryAccess()), new byte[0],
 				"picked up " + Snapshots.describe(stack), 0L);
+		// Remember that this entity now lives in an inventory: rolling back whatever dropped it must
+		// not run before this pickup is undone, or the item would exist twice.
+		hub.markPickedUp(itemEntity.getStringUUID());
 	}
 
 	/** Called from the container menu mixin with the slot snapshot diff already computed. */

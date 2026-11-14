@@ -271,6 +271,14 @@ public final class ActivityStore implements AutoCloseable {
 		if (refs == null || refs.isEmpty()) {
 			return List.of();
 		}
+		// Records are read back from the files, so whatever is still buffered must be written first;
+		// otherwise the newest consequences of an activity would silently be missing.
+		try {
+			if (consequenceWriter != null) {
+				consequenceWriter.flush(false);
+			}
+		} catch (IOException ignored) {
+		}
 		List<ConsequenceRecord> result = new ArrayList<>(refs.size());
 		Path consequencePath = null;
 		int lastSegment = -1;

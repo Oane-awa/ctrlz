@@ -24,6 +24,7 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 	private final Screen parent;
 	private final long activityId;
 	private int offset;
+	private boolean requested;
 
 	public DetailScreen(Screen parent, long activityId) {
 		super(Component.translatable("ctrlz.gui.detail_title"));
@@ -33,7 +34,12 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 
 	@Override
 	protected void init() {
-		ClientNet.requestDetail(activityId);
+		// init() runs again on every rebuildWidgets(), and each server answer triggers one, so the
+		// request must be guarded or the screen would keep asking for the same detail forever.
+		if (!requested) {
+			requested = true;
+			ClientNet.requestDetail(activityId);
+		}
 		int navY = this.height - 28;
 		addRenderableWidget(Button.builder(Component.literal("<"), button -> page(-PAGE)).bounds(16, navY, 30, 20)
 				.build());
@@ -52,6 +58,10 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 
 	@Override
 	public void onDataChanged() {
+		Messages.RollbackResultDto result = ClientNet.lastResult();
+		if (result != null) {
+			ClientNet.requestDetail(activityId);
+		}
 		rebuildWidgets();
 	}
 

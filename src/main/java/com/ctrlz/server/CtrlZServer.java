@@ -44,6 +44,7 @@ public final class CtrlZServer {
 	private final Map<Long, MergeBucket> buckets = new HashMap<>();
 	private final Map<Long, CausalWindow> windows = new HashMap<>();
 	private final Map<UUID, List<net.minecraft.world.item.ItemStack>> lastInventories = new ConcurrentHashMap<>();
+	private final Map<UUID, Vec3> lastPositions = new ConcurrentHashMap<>();
 
 	private long lastAutosaveMillis;
 	private int suppressionDepth;
@@ -194,10 +195,20 @@ public final class CtrlZServer {
 			if (!session.dimension().equals(dimension)) {
 				session.flush(tick);
 				sessions.remove(player.getUUID());
+				lastPositions.remove(player.getUUID());
 				session = session(player);
 			}
-			if (config.recordMovement) {
-				Vec3 position = player.position();
+			Vec3 position = player.position();
+			Vec3 previous = lastPositions.put(player.getUUID(), position);
+			// Only a real displacement is movement. Feeding every tick used to keep a MOVE open
+			// forever and seal every other action one tick after it started.
+			if (config.recordMovement && previous != null && previous.distanceToSqr(position) > 1.0E-4) {
+				if (session.movement() == null) {
+					// Start the trace where the player stood before this step, so a rollback
+					// returns to the real starting point and not to one step after it.
+					session.observeMovement(new ActivitySession.Sample(tick - 1, previous.x, previous.y, previous.z,
+							player.isSprinting(), player.isShiftKeyDown(), player.onGround()));
+				}
 				session.observeMovement(new ActivitySession.Sample(tick, position.x, position.y, position.z,
 						player.isSprinting(), player.isShiftKeyDown(), player.onGround()));
 			}
@@ -262,6 +273,9 @@ public final class CtrlZServer {
 			if (store == null) {
 				return;
 			}
+			if (record.kind() == ActivityKind.MOVE) {
+				recordMoveConsequence(record);
+			}
 			List<ConsequenceRecord> pendingConsequences = drainBucket(record.id());
 			try {
 				for (ConsequenceRecord consequence : pendingConsequences) {
@@ -272,7 +286,91 @@ public final class CtrlZServer {
 				store.flush(false);
 			} catch (IOException ignored) {
 			}
-			windows.remove(record.id());
+			// The causal window is deliberately kept: redstone, pistons and fluids keep reacting
+			// after the click that started them, and those late changes still belong to it.
+		}
+	}
+
+	/**
+	 * A walk is undone by teleporting the player back to where it started, so the movement itself
+	 * needs a restorable state change. Walks shorter than one block have nothing worth undoing.
+	 */
+	private void recordMoveConsequence(ActivityRecord record) {
+		List<com.ctrlz.core.trace.TracePoint> trace = record.trace();
+		if (trace.size() < 2) {
+			return;
+		}
+		com.ctrlz.core.trace.TracePoint first = trace.get(0);
+		com.ctrlz.core.trace.TracePoint last = trace.get(trace.size() - 1);
+		if (first.distanceTo(last) < 1.0) {
+			return;
+		}
+		consequence(record, ConsequenceKind.PLAYER_STATE, ConsequenceOrigin.DIRECT, record.dimension(),
+				record.startPacked(), "player#" + record.playerId(), encodePosition(first), encodePosition(last),
+				String.format("move %.1f %.1f %.1f -> %.1f %.1f %.1f", first.x, first.y, first.z, last.x, last.y,
+						last.z),
+				0L);
+	}
+
+	public static byte[] encodePosition(com.ctrlz.core.trace.TracePoint point) {
+		return (point.x + ";" + point.y + ";" + point.z).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+	}
+
+	public static byte[] encodePosition(double x, double y, double z) {
+		return (x + ";" + y + ";" + z).getBytes(java.nio.charset.StandardCharsets.UTF_8);
+	}
+
+	/**
+	 * Seals the open activities of the player that owns {@code activity}. An activity that is still
+	 * recording cannot be rolled back, and the one the player just did is exactly that one.
+	 */
+	public void sealIfOpen(ActivityRecord activity) {
+		ActivitySession session = sessions.get(activity.playerId());
+		if (session != null && session.owns(activity)) {
+			session.flush(currentTick());
+		}
+	}
+
+	/** Seals everything the player is currently doing, so the newest activity becomes rollbackable. */
+	public void flushSession(UUID playerId) {
+		ActivitySession session = sessions.get(playerId);
+		if (session != null) {
+			session.flush(currentTick());
+		}
+	}
+
+	/** Forgets the inventory/position baselines so a rollback is never recorded as a new activity. */
+	public void resyncBaselines() {
+		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
+			lastInventories.put(player.getUUID(), Recorder.snapshotInventory(player));
+			lastPositions.put(player.getUUID(), player.position());
+		}
+	}
+
+	private final java.util.Set<String> pickedUp = java.util.Collections.newSetFromMap(
+			new java.util.LinkedHashMap<String, Boolean>() {
+				@Override
+				protected boolean removeEldestEntry(Map.Entry<String, Boolean> eldest) {
+					return size() > 8192;
+				}
+			});
+
+	public synchronized void markPickedUp(String entityUuid) {
+		pickedUp.add(entityUuid);
+	}
+
+	public synchronized void unmarkPickedUp(String entityUuid) {
+		pickedUp.remove(entityUuid);
+	}
+
+	public synchronized boolean wasPickedUp(String entityUuid) {
+		return pickedUp.contains(entityUuid);
+	}
+
+	/** Marks a position as touched by an activity so changes around it can be attributed to it. */
+	public void touch(ActivityRecord activity, String dimension, long packedPos) {
+		if (activity != null && packedPos != ConsequenceRecord.NO_POSITION) {
+			touchWindow(activity, dimension, packedPos, 0L, currentTick());
 		}
 	}
 
@@ -284,6 +382,21 @@ public final class CtrlZServer {
 		Vec3 position = player.position();
 		return session(player).observeAction(kind, new ActivitySession.Sample(currentTick(), position.x, position.y,
 				position.z, player.isSprinting(), player.isShiftKeyDown(), player.onGround()));
+	}
+
+	/** Counts a jump on the player's movement activity, opening one when the player was standing. */
+	public void recordJump(ServerPlayer player) {
+		if (!config.enabled || store == null) {
+			return;
+		}
+		ActivitySession session = session(player);
+		ActivityRecord movement = session.movement();
+		if (movement == null) {
+			Vec3 position = player.position();
+			movement = session.observeMovement(new ActivitySession.Sample(currentTick(), position.x, position.y,
+					position.z, player.isSprinting(), player.isShiftKeyDown(), player.onGround()));
+		}
+		movement.increment(ActivityStat.JUMPS, 1);
 	}
 
 	public ActivityRecord currentActivity(ServerPlayer player) {
@@ -302,7 +415,26 @@ public final class CtrlZServer {
 			return null;
 		}
 		int tick = currentTick();
-		String key = kind.id() + "|" + packedPos + "|" + subject;
+		if (activity.status() != ActivityStatus.RECORDING) {
+			// A late consequence (redstone, pistons, fluids) of an activity that is already sealed
+			// goes straight to disk; waiting for a seal that already happened would lose it.
+			ConsequenceRecord late = new ConsequenceRecord(store.allocateConsequenceId(), activity.id(), kind, origin,
+					tick, dimension, packedPos, subject, before, after, parentId == 0L ? 0 : 1, parentId,
+					System.currentTimeMillis(), detail);
+			try {
+				store.appendConsequence(late);
+				activity.setConsequenceCount(store.consequenceCount(activity.id()));
+				store.updateStatus(activity);
+			} catch (IOException e) {
+				return null;
+			}
+			touchForKind(activity, kind, dimension, packedPos, late.id(), tick);
+			return late;
+		}
+		// A block is one target no matter what it turned into, so its changes fold into a single
+		// original -> final pair. Slots stay distinct per slot.
+		boolean blockKind = kind == ConsequenceKind.BLOCK_STATE || kind == ConsequenceKind.BLOCK_ENTITY_DATA;
+		String key = kind.id() + "|" + packedPos + "|" + (blockKind ? "" : subject);
 		MergeBucket bucket = buckets.computeIfAbsent(activity.id(), id -> new MergeBucket());
 		ConsequenceRecord existing = bucket.entries.get(key);
 		ConsequenceRecord record;
@@ -316,8 +448,21 @@ public final class CtrlZServer {
 			bucket.entries.put(key, record);
 			bucket.order.add(record);
 		}
-		touchWindow(activity, dimension, packedPos, record.id(), tick);
+		touchForKind(activity, kind, dimension, packedPos, record.id(), tick);
 		return record;
+	}
+
+	/**
+	 * Only world blocks and containers extend the causal window. Player state, inventory slots and
+	 * item entities carry no meaningful position to attribute other changes from.
+	 */
+	private void touchForKind(ActivityRecord activity, ConsequenceKind kind, String dimension, long packedPos,
+			long consequenceId, int tick) {
+		boolean spatial = kind == ConsequenceKind.BLOCK_STATE || kind == ConsequenceKind.BLOCK_ENTITY_DATA
+				|| kind == ConsequenceKind.CONTAINER_SLOTS;
+		if (spatial && packedPos != ConsequenceRecord.NO_POSITION) {
+			touchWindow(activity, dimension, packedPos, consequenceId, tick);
+		}
 	}
 
 	public void addStat(ActivityRecord activity, ActivityStat stat, int amount) {
@@ -340,7 +485,7 @@ public final class CtrlZServer {
 			int tick) {
 		CausalWindow window = windows.computeIfAbsent(activity.id(), id -> new CausalWindow());
 		window.dimension = dimension;
-		window.expiresTick = tick + Math.max(20, config.movementMergeGapTicks / 2);
+		window.expiresTick = tick + 60;
 		window.owner = activity.id();
 		if (window.touched.size() < 96) {
 			window.touched.put(packedPos, consequenceId);
@@ -362,6 +507,7 @@ public final class CtrlZServer {
 		int y = ByteIO.unpackY(packedPos);
 		int z = ByteIO.unpackZ(packedPos);
 		CausalLink best = null;
+		int bestDistance = Integer.MAX_VALUE;
 		for (CausalWindow window : windows.values()) {
 			if (!dimension.equals(window.dimension) || tick > window.expiresTick) {
 				continue;
@@ -370,11 +516,16 @@ public final class CtrlZServer {
 				int dx = Math.abs(ByteIO.unpackX(entry.getKey()) - x);
 				int dy = Math.abs(ByteIO.unpackY(entry.getKey()) - y);
 				int dz = Math.abs(ByteIO.unpackZ(entry.getKey()) - z);
-				if (dx <= 2 && dy <= 2 && dz <= 2) {
-					if (best == null || entry.getValue() > best.parentConsequenceId()) {
-						best = new CausalLink(window.owner, entry.getValue(),
-								dx == 0 && dy == 0 && dz == 0 ? ConsequenceOrigin.DIRECT : ConsequenceOrigin.INDIRECT);
-					}
+				if (dx > 2 || dy > 2 || dz > 2) {
+					continue;
+				}
+				int distance = dx + dy + dz;
+				boolean closer = distance < bestDistance;
+				boolean newer = distance == bestDistance && best != null && entry.getValue() > best.parentConsequenceId();
+				if (best == null || closer || newer) {
+					bestDistance = distance;
+					best = new CausalLink(window.owner, entry.getValue(),
+							distance == 0 ? ConsequenceOrigin.DIRECT : ConsequenceOrigin.INDIRECT);
 				}
 			}
 		}

@@ -7,15 +7,20 @@ import com.ctrlz.core.util.ByteIO;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.UUID;
+import java.util.function.LongSupplier;
 
 /**
  * Per player activity segmentation state machine.
  *
- * <p>It owns the "one continuous action is one activity" rule. Movement keeps extending the same
- * activity while the player keeps moving (direction changes are just new key frames), and the
- * other kinds merge while they stay inside their merge window.
+ * <p>A player can walk and mine at the same time, so two activities may be open at once: one
+ * movement slot and one action slot. They never close each other. Movement only advances when the
+ * player really changed position, which is what keeps a standing player from sealing every action
+ * one tick after it started.
  */
 public final class ActivitySession {
+	/** A single tick displacement at or above this is a teleport, not walking. */
+	public static final double TELEPORT_DISTANCE = 16.0;
+
 	public interface Sink {
 		void opened(ActivityRecord record);
 
@@ -34,16 +39,19 @@ public final class ActivitySession {
 	private final int mergeGapTicks;
 	private final int checkpointTicks;
 	private final String dimension;
-	private final java.util.function.LongSupplier idSource;
+	private final LongSupplier idSource;
 
-	private ActivityRecord current;
+	private ActivityRecord movement;
 	private final List<TracePoint> pending = new ArrayList<>();
 	private TracePoint lastTrace;
-	private int lastCheckpointTick;
 	private double accumulatedDistance;
+	private int movementCheckpointTick;
+
+	private ActivityRecord action;
+	private int actionCheckpointTick;
 
 	public ActivitySession(UUID playerId, String playerName, String dimension, int mergeGapTicks,
-			int checkpointTicks, java.util.function.LongSupplier idSource, Sink sink) {
+			int checkpointTicks, LongSupplier idSource, Sink sink) {
 		this.playerId = playerId;
 		this.playerName = playerName;
 		this.dimension = dimension;
@@ -53,70 +61,94 @@ public final class ActivitySession {
 		this.checkpointTicks = Math.max(20, checkpointTicks);
 	}
 
+	/** The activity new consequences should be attributed to: the action if one is open. */
 	public ActivityRecord current() {
-		return current;
+		return action != null ? action : movement;
+	}
+
+	public ActivityRecord movement() {
+		return movement;
+	}
+
+	public ActivityRecord action() {
+		return action;
+	}
+
+	public boolean owns(ActivityRecord record) {
+		return record != null && (record == movement || record == action);
 	}
 
 	public String dimension() {
 		return dimension;
 	}
 
-	/** Feeds one server tick of movement and returns the activity that owns it. */
+	/** Feeds one tick of real movement and returns the movement activity that owns it. */
 	public ActivityRecord observeMovement(Sample sample) {
 		int tick = sample.tick();
-		if (current != null && current.kind() == ActivityKind.MOVE && tick - current.endTick() <= mergeGapTicks) {
-			extendMovement(sample);
-			return current;
+		if (movement != null && tick - movement.endTick() > mergeGapTicks) {
+			closeMovement(tick);
 		}
-		closeCurrent(tick);
-		open(ActivityKind.MOVE, sample);
+		if (movement != null && lastTrace != null && distance(lastTrace, sample) >= TELEPORT_DISTANCE) {
+			closeMovement(tick);
+		}
+		if (movement == null) {
+			openMovement(sample);
+		}
 		extendMovement(sample);
-		return current;
+		return movement;
 	}
 
-	/** Feeds a discrete action, merging it into the open activity when it is continuous. */
+	/** Feeds a discrete action, merging it into the open action when it is continuous. */
 	public ActivityRecord observeAction(ActivityKind kind, Sample sample) {
 		int tick = sample.tick();
-		if (current != null && current.kind() == kind && current.kind().canMergeWith(kind)
-				&& tick - current.endTick() <= kind.defaultMergeGapTicks()) {
-			int previousEnd = current.endTick();
-			current.setEnd(tick, System.currentTimeMillis(), pack(sample));
-			current.increment(ActivityStat.TICKS, Math.max(0, tick - previousEnd));
-			checkpointIfDue(tick);
-			return current;
+		if (action != null && action.kind() == kind && kind.canMergeWith(action.kind())
+				&& tick - action.endTick() <= kind.defaultMergeGapTicks()) {
+			int previousEnd = action.endTick();
+			action.setEnd(tick, System.currentTimeMillis(), pack(sample));
+			action.increment(ActivityStat.TICKS, Math.max(0, tick - previousEnd));
+			if (tick - actionCheckpointTick >= checkpointTicks) {
+				actionCheckpointTick = tick;
+				sink.checkpointed(action);
+			}
+			return action;
 		}
-		closeCurrent(tick);
-		open(kind, sample);
-		return current;
-	}
-
-	/** Seals the open activity once the player has been idle longer than the merge window. */
-	public void tick(int tick) {
-		if (current == null) {
-			return;
-		}
-		ActivityKind kind = current.kind();
-		int gap = kind == ActivityKind.MOVE ? mergeGapTicks : Math.max(mergeGapTicks, kind.defaultMergeGapTicks());
-		if (tick - current.endTick() > gap) {
-			closeCurrent(tick);
-		} else if (tick - lastCheckpointTick >= checkpointTicks) {
-			checkpoint();
-		}
-	}
-
-	public void flush(int tick) {
-		closeCurrent(tick);
-	}
-
-	private void open(ActivityKind kind, Sample sample) {
+		closeAction(tick);
 		long id = idSource.getAsLong();
-		current = new ActivityRecord(id, playerId, playerName, kind, dimension, sample.tick(),
+		action = new ActivityRecord(id, playerId, playerName, kind, dimension, tick, System.currentTimeMillis(),
+				pack(sample));
+		actionCheckpointTick = tick;
+		sink.opened(action);
+		return action;
+	}
+
+	/** Seals activities that have been idle for longer than their merge window. */
+	public void tick(int tick) {
+		if (movement != null && tick - movement.endTick() > mergeGapTicks) {
+			closeMovement(tick);
+		}
+		if (action != null) {
+			int gap = Math.max(5, action.kind().defaultMergeGapTicks());
+			if (tick - action.endTick() > gap) {
+				closeAction(tick);
+			}
+		}
+	}
+
+	/** Seals every open activity right now. */
+	public void flush(int tick) {
+		closeMovement(tick);
+		closeAction(tick);
+	}
+
+	private void openMovement(Sample sample) {
+		long id = idSource.getAsLong();
+		movement = new ActivityRecord(id, playerId, playerName, ActivityKind.MOVE, dimension, sample.tick(),
 				System.currentTimeMillis(), pack(sample));
 		pending.clear();
 		lastTrace = null;
 		accumulatedDistance = 0.0;
-		lastCheckpointTick = sample.tick();
-		sink.opened(current);
+		movementCheckpointTick = sample.tick();
+		sink.opened(movement);
 	}
 
 	private void extendMovement(Sample sample) {
@@ -124,53 +156,64 @@ public final class ActivitySession {
 				sample.sneaking(), sample.onGround());
 		if (lastTrace != null) {
 			double step = lastTrace.distanceTo(point);
-			if (step > 0.0 && step < 16.0) {
+			if (step > 0.0 && step < TELEPORT_DISTANCE) {
 				accumulatedDistance += step;
 			}
 		}
 		pending.add(point);
 		lastTrace = point;
-		current.setEnd(sample.tick(), System.currentTimeMillis(), pack(sample));
-		current.stats()[ActivityStat.BLOCKS_WALKED_CM.ordinal()] = (int) Math.min(Integer.MAX_VALUE,
+		movement.setEnd(sample.tick(), System.currentTimeMillis(), pack(sample));
+		movement.stats()[ActivityStat.BLOCKS_WALKED_CM.ordinal()] = (int) Math.min(Integer.MAX_VALUE,
 				Math.round(accumulatedDistance * 100.0));
-		current.increment(ActivityStat.TICKS, 1);
-		checkpointIfDue(sample.tick());
-	}
-
-	private void checkpointIfDue(int tick) {
-		if (tick - lastCheckpointTick >= checkpointTicks) {
-			checkpoint();
+		movement.increment(ActivityStat.TICKS, 1);
+		if (sample.tick() - movementCheckpointTick >= checkpointTicks) {
+			checkpointMovement();
 		}
 	}
 
-	private void checkpoint() {
-		if (current == null) {
+	private void checkpointMovement() {
+		List<TracePoint> compressed = TraceCompressor.compress(pending, 0.08, 0.02);
+		movement.trace().clear();
+		movement.trace().addAll(compressed);
+		// Keep only the key frames so a long walk does not grow memory with every tick.
+		pending.clear();
+		pending.addAll(compressed);
+		lastTrace = pending.isEmpty() ? null : pending.get(pending.size() - 1);
+		movementCheckpointTick = movement.endTick();
+		sink.checkpointed(movement);
+	}
+
+	private void closeMovement(int tick) {
+		if (movement == null) {
 			return;
 		}
-		if (current.kind() == ActivityKind.MOVE) {
-			List<TracePoint> compressed = TraceCompressor.compress(pending, 0.08, 0.02);
-			current.trace().clear();
-			current.trace().addAll(compressed);
-		}
-		lastCheckpointTick = current.endTick();
-		sink.checkpointed(current);
-	}
-
-	private void closeCurrent(int tick) {
-		if (current == null) {
-			return;
-		}
-		if (current.kind() == ActivityKind.MOVE) {
-			List<TracePoint> compressed = TraceCompressor.compress(pending, 0.08, 0.02);
-			current.trace().clear();
-			current.trace().addAll(compressed);
-		}
-		current.setEnd(Math.max(current.endTick(), tick), System.currentTimeMillis(), current.endPacked());
-		sink.sealed(current);
-		current = null;
+		List<TracePoint> compressed = TraceCompressor.compress(pending, 0.08, 0.02);
+		movement.trace().clear();
+		movement.trace().addAll(compressed);
+		movement.setEnd(Math.max(movement.endTick(), tick), System.currentTimeMillis(), movement.endPacked());
+		ActivityRecord closing = movement;
+		movement = null;
 		pending.clear();
 		lastTrace = null;
 		accumulatedDistance = 0.0;
+		sink.sealed(closing);
+	}
+
+	private void closeAction(int tick) {
+		if (action == null) {
+			return;
+		}
+		action.setEnd(Math.max(action.endTick(), tick), System.currentTimeMillis(), action.endPacked());
+		ActivityRecord closing = action;
+		action = null;
+		sink.sealed(closing);
+	}
+
+	private static double distance(TracePoint a, Sample b) {
+		double dx = a.x - b.x();
+		double dy = a.y - b.y();
+		double dz = a.z - b.z();
+		return Math.sqrt(dx * dx + dy * dy + dz * dz);
 	}
 
 	private static long pack(Sample sample) {

@@ -35,12 +35,15 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 	@Override
 	protected void init() {
 		rows.clear();
+		// Always ask the server once per opened screen. The cached copy is only shown while the
+		// fresh answer is in flight; trusting it unconditionally is what froze the list before.
+		if (!requested) {
+			requested = true;
+			ClientNet.requestHistory(offset, null);
+		}
 		Messages.HistoryDto data = ClientNet.history();
 		if (data != null) {
 			rows.addAll(data.items());
-		} else if (!requested) {
-			requested = true;
-			ClientNet.requestHistory(offset, null);
 		}
 
 		int rowWidth = Math.max(180, this.width - 150);
@@ -63,6 +66,8 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 				.bounds(16, navY, 30, 20).build());
 		addRenderableWidget(Button.builder(Component.literal(">"), button -> page(ROWS_PER_PAGE))
 				.bounds(52, navY, 30, 20).build());
+		addRenderableWidget(Button.builder(Component.translatable("ctrlz.gui.refresh"), button -> refresh())
+				.bounds(88, navY, 60, 20).build());
 		addRenderableWidget(Button.builder(Component.translatable("ctrlz.gui.rollback_last"),
 				button -> ClientNet.rollbackLast()).bounds(this.width / 2 - 100, navY, 96, 20).build());
 		addRenderableWidget(Button.builder(Component.translatable("ctrlz.gui.config"),
@@ -73,17 +78,22 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 
 	private void page(int delta) {
 		offset = Math.max(0, offset + delta);
-		requested = false;
+		refresh();
+	}
+
+	private void refresh() {
+		requested = true;
 		ClientNet.requestHistory(offset, null);
-		rebuildWidgets();
 	}
 
 	@Override
 	public void onDataChanged() {
 		Messages.RollbackResultDto result = ClientNet.lastResult();
-		if (result != null && !result.success()) {
-			// keep the message on screen through the header line
-			this.lastResultKey = result.message();
+		if (result != null) {
+			this.lastResultKey = result.success() ? "" : result.message();
+			// A rollback changes the status of rows already on screen, so fetch the list again.
+			// The follow up history answer carries no result, which ends the refresh chain.
+			refresh();
 		}
 		rebuildWidgets();
 	}

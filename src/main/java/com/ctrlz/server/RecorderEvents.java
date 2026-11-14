@@ -38,7 +38,7 @@ public final class RecorderEvents {
 					if (Recorder.isBlockItem(held)) {
 						Recorder.onBlockPlaced(serverPlayer, hitResult.getBlockPos(), held);
 					} else {
-						Recorder.onItemUsed(serverPlayer, held);
+						Recorder.onItemUsed(serverPlayer, held, hitResult.getBlockPos());
 					}
 				} catch (Throwable ignored) {
 				}

@@ -13,7 +13,7 @@ public enum ActivityKind {
 	ATTACK(3, MergeGroup.COMBAT, 100),
 	BREAK_BLOCK(4, MergeGroup.MINING, 60),
 	PLACE_BLOCK(5, MergeGroup.BUILDING, 60),
-	USE_ITEM(6, MergeGroup.NONE, 0),
+	USE_ITEM(6, MergeGroup.USE, 10),
 	OPEN_CONTAINER(7, MergeGroup.CONTAINER_ACCESS, 40),
 	CLOSE_CONTAINER(8, MergeGroup.CONTAINER_ACCESS, 40),
 	CRAFT(9, MergeGroup.CRAFTING, 60),
@@ -32,6 +32,7 @@ public enum ActivityKind {
 		CONTAINER_ACCESS,
 		INVENTORY,
 		CRAFTING,
+		USE,
 		NONE
 	}
 

@@ -1,6 +1,5 @@
 package com.ctrlz.server;
 
-import com.ctrlz.core.consequence.ConsequenceKind;
 import com.ctrlz.core.consequence.ConsequenceRecord;
 import com.ctrlz.core.rollback.ConflictType;
 import com.ctrlz.core.rollback.ConsequenceRestorer;
@@ -16,8 +15,10 @@ import net.minecraft.world.entity.item.ItemEntity;
 import net.minecraft.world.item.ItemStack;
 import net.minecraft.world.level.block.entity.BlockEntity;
 import net.minecraft.world.level.block.state.BlockState;
+import net.minecraft.world.phys.Vec3;
 
 import java.nio.charset.StandardCharsets;
+import java.util.Set;
 import java.util.UUID;
 
 /**
@@ -28,9 +29,12 @@ import java.util.UUID;
  */
 public final class ServerRestorer implements ConsequenceRestorer {
 	private final MinecraftServer server;
+	/** Entities picked up by a consequence of the very rollback being executed. */
+	private final Set<String> pickedUpInBatch;
 
-	public ServerRestorer(MinecraftServer server) {
+	public ServerRestorer(MinecraftServer server, Set<String> pickedUpInBatch) {
 		this.server = server;
+		this.pickedUpInBatch = pickedUpInBatch;
 	}
 
 	private ServerLevel level(String dimension) {
@@ -47,6 +51,8 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				ByteIO.unpackZ(consequence.packedPos()));
 	}
 
+	// ------------------------------------------------------------------ checks
+
 	@Override
 	public ConflictType check(ConsequenceRecord consequence) {
 		try {
@@ -54,8 +60,8 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				case BLOCK_STATE -> checkBlock(consequence);
 				case CONTAINER_SLOTS -> checkContainer(consequence);
 				case INVENTORY_SLOTS -> checkInventory(consequence);
-				case ITEM_ENTITY_SPAWN -> ConflictType.NONE;
-				case ENTITY_HEALTH -> ConflictType.NONE;
+				case ITEM_ENTITY_SPAWN -> checkItemEntity(consequence);
+				case PLAYER_STATE -> checkPlayer(consequence);
 				default -> ConflictType.NONE;
 			};
 		} catch (RuntimeException e) {
@@ -69,31 +75,100 @@ public final class ServerRestorer implements ConsequenceRestorer {
 			return ConflictType.TARGET_MISSING;
 		}
 		BlockState expected = Snapshots.decodeBlockState(new String(consequence.after(), StandardCharsets.UTF_8));
-		if (expected == null) {
+		BlockState original = Snapshots.decodeBlockState(new String(consequence.before(), StandardCharsets.UTF_8));
+		if (expected == null || original == null) {
 			return ConflictType.NO_SNAPSHOT;
 		}
-		BlockState current = level.getBlockState(posOf(consequence));
-		return current.equals(expected) ? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+		return level.getBlockState(posOf(consequence)).equals(expected) ? ConflictType.NONE
+				: ConflictType.STATE_MISMATCH;
 	}
 
 	private ConflictType checkContainer(ConsequenceRecord consequence) {
-		return ConflictType.NONE;
+		String subject = consequence.subject();
+		if (subject.startsWith("unsupported#")) {
+			return ConflictType.UNSUPPORTED_MODDED_STATE;
+		}
+		if (subject.startsWith("ender#")) {
+			ServerPlayer player = playerFromSubject(subject);
+			if (player == null) {
+				return ConflictType.TARGET_MISSING;
+			}
+			return slotMatches(player.getEnderChestInventory(), slotIndex(subject), consequence, player.level())
+					? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+		}
+		ServerLevel level = level(consequence.dimension());
+		if (level == null || !consequence.hasPosition()
+				|| !(level.getBlockEntity(posOf(consequence)) instanceof Container container)) {
+			return ConflictType.TARGET_MISSING;
+		}
+		return slotMatches(container, slotIndex(subject), consequence, level) ? ConflictType.NONE
+				: ConflictType.STATE_MISMATCH;
 	}
 
 	private ConflictType checkInventory(ConsequenceRecord consequence) {
+		ServerPlayer player = playerFromSubject(consequence.subject());
+		if (player == null) {
+			return ConflictType.TARGET_MISSING;
+		}
+		return slotMatches(player.getInventory(), slotIndex(consequence.subject()), consequence, player.level())
+				? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+	}
+
+	private boolean slotMatches(Container container, int slot, ConsequenceRecord consequence,
+			net.minecraft.world.level.Level level) {
+		if (slot < 0 || slot >= container.getContainerSize()) {
+			return false;
+		}
+		ItemStack expected = Snapshots.decodeSingleItem(consequence.after(), level.registryAccess());
+		return ItemStack.matches(container.getItem(slot), expected);
+	}
+
+	private ConflictType checkItemEntity(ConsequenceRecord consequence) {
+		if (consequence.after().length == 0) {
+			return ConflictType.NONE;
+		}
+		// The drop is gone. If it ended up in somebody's inventory, rolling back its source would
+		// leave that item behind as well as the restored block, which is a duplicate.
+		CtrlZServer hub = CtrlZServer.get();
+		boolean missing = findEntity(consequence.subject()) == null;
+		if (missing && hub != null && hub.wasPickedUp(consequence.subject())
+				&& !pickedUpInBatch.contains(consequence.subject())) {
+			return ConflictType.STATE_MISMATCH;
+		}
 		return ConflictType.NONE;
 	}
+
+	private ConflictType checkPlayer(ConsequenceRecord consequence) {
+		ServerPlayer player = playerFromSubject(consequence.subject());
+		ServerLevel level = level(consequence.dimension());
+		if (player == null || level == null) {
+			return ConflictType.TARGET_MISSING;
+		}
+		double[] target = parsePosition(consequence.before());
+		if (target == null) {
+			return ConflictType.NO_SNAPSHOT;
+		}
+		BlockPos feet = BlockPos.containing(target[0], target[1], target[2]);
+		BlockPos head = feet.above();
+		boolean free = level.getBlockState(feet).getCollisionShape(level, feet).isEmpty()
+				&& level.getBlockState(head).getCollisionShape(level, head).isEmpty();
+		return free ? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+	}
+
+	// ------------------------------------------------------------------ restore / reapply
 
 	@Override
 	public boolean restore(ConsequenceRecord consequence) {
 		try {
 			return switch (consequence.kind()) {
-				case BLOCK_STATE -> restoreBlock(consequence);
+				case BLOCK_STATE -> applyBlock(consequence, consequence.before());
 				case BLOCK_ENTITY_DATA -> restoreBlockEntity(consequence);
-				case CONTAINER_SLOTS -> restoreContainer(consequence);
-				case INVENTORY_SLOTS -> restoreInventory(consequence);
-				case ITEM_ENTITY_SPAWN -> restoreItemEntity(consequence);
-				case ENTITY_HEALTH -> restoreHealth(consequence);
+				case CONTAINER_SLOTS -> applyContainer(consequence, consequence.before());
+				case INVENTORY_SLOTS -> applyInventory(consequence, consequence.before());
+				case ITEM_ENTITY_SPAWN -> consequence.after().length > 0 ? discardItem(consequence)
+						: spawnItem(consequence, consequence.before(), false);
+				case ENTITY_HEALTH -> applyHealth(consequence, consequence.before());
+				case PLAYER_STATE -> applyPlayer(consequence, consequence.before());
 				default -> true;
 			};
 		} catch (RuntimeException e) {
@@ -106,11 +181,12 @@ public final class ServerRestorer implements ConsequenceRestorer {
 		try {
 			return switch (consequence.kind()) {
 				case BLOCK_STATE -> applyBlock(consequence, consequence.after());
-				case BLOCK_ENTITY_DATA -> true;
 				case CONTAINER_SLOTS -> applyContainer(consequence, consequence.after());
 				case INVENTORY_SLOTS -> applyInventory(consequence, consequence.after());
-				case ITEM_ENTITY_SPAWN -> reapplyItemEntity(consequence);
+				case ITEM_ENTITY_SPAWN -> consequence.after().length > 0 ? spawnItem(consequence, consequence.after(), true)
+						: discardItem(consequence);
 				case ENTITY_HEALTH -> applyHealth(consequence, consequence.after());
+				case PLAYER_STATE -> applyPlayer(consequence, consequence.after());
 				default -> true;
 			};
 		} catch (RuntimeException e) {
@@ -118,17 +194,10 @@ public final class ServerRestorer implements ConsequenceRestorer {
 		}
 	}
 
-	private boolean restoreBlock(ConsequenceRecord consequence) {
-		return applyBlock(consequence, consequence.before());
-	}
-
 	private boolean applyBlock(ConsequenceRecord consequence, byte[] stateBytes) {
 		ServerLevel level = level(consequence.dimension());
-		if (level == null) {
-			return false;
-		}
 		BlockState state = Snapshots.decodeBlockState(new String(stateBytes, StandardCharsets.UTF_8));
-		if (state == null) {
+		if (level == null || state == null) {
 			return false;
 		}
 		level.setBlock(posOf(consequence), state, 3);
@@ -137,111 +206,102 @@ public final class ServerRestorer implements ConsequenceRestorer {
 
 	private boolean restoreBlockEntity(ConsequenceRecord consequence) {
 		ServerLevel level = level(consequence.dimension());
-		if (level == null || consequence.before().length == 0) {
-			return true;
-		}
-		BlockEntity blockEntity = level.getBlockEntity(posOf(consequence));
-		if (blockEntity == null) {
+		if (level == null) {
 			return false;
 		}
+		if (consequence.before().length == 0) {
+			return true;
+		}
+		BlockPos pos = posOf(consequence);
+		BlockEntity blockEntity = level.getBlockEntity(pos);
 		net.minecraft.nbt.CompoundTag tag = Snapshots.readTag(consequence.before());
-		if (tag == null) {
+		if (blockEntity == null || tag == null) {
 			return false;
 		}
 		blockEntity.loadWithComponents(net.minecraft.world.level.storage.TagValueInput.create(
 				net.minecraft.util.ProblemReporter.DISCARDING, level.registryAccess(), tag));
 		blockEntity.setChanged();
-		level.sendBlockUpdated(posOf(consequence), level.getBlockState(posOf(consequence)),
-				level.getBlockState(posOf(consequence)), 3);
+		BlockState state = level.getBlockState(pos);
+		level.sendBlockUpdated(pos, state, state, 3);
 		return true;
 	}
 
-	private boolean restoreContainer(ConsequenceRecord consequence) {
-		return applyContainer(consequence, consequence.before());
+	private boolean applyContainer(ConsequenceRecord consequence, byte[] itemBytes) {
+		String subject = consequence.subject();
+		if (subject.startsWith("unsupported#")) {
+			return false;
+		}
+		if (subject.startsWith("ender#")) {
+			ServerPlayer player = playerFromSubject(subject);
+			return player != null && setSlot(player.getEnderChestInventory(), slotIndex(subject), itemBytes,
+					player.level());
+		}
+		ServerLevel level = level(consequence.dimension());
+		if (level == null || !consequence.hasPosition()
+				|| !(level.getBlockEntity(posOf(consequence)) instanceof Container container)) {
+			return false;
+		}
+		return setSlot(container, slotIndex(subject), itemBytes, level);
 	}
 
-	private boolean applyContainer(ConsequenceRecord consequence, byte[] itemBytes) {
-		ServerLevel level = level(consequence.dimension());
-		if (level == null || !consequence.hasPosition()) {
-			return false;
-		}
-		BlockEntity blockEntity = level.getBlockEntity(posOf(consequence));
-		if (!(blockEntity instanceof Container container)) {
-			return false;
-		}
-		int slot = slotIndex(consequence.subject());
+	private boolean applyInventory(ConsequenceRecord consequence, byte[] itemBytes) {
+		ServerPlayer player = playerFromSubject(consequence.subject());
+		return player != null
+				&& setSlot(player.getInventory(), slotIndex(consequence.subject()), itemBytes, player.level());
+	}
+
+	private boolean setSlot(Container container, int slot, byte[] itemBytes, net.minecraft.world.level.Level level) {
 		if (slot < 0 || slot >= container.getContainerSize()) {
 			return false;
 		}
-		ItemStack stack = Snapshots.decodeSingleItem(itemBytes, level.registryAccess());
-		container.setItem(slot, stack);
+		container.setItem(slot, Snapshots.decodeSingleItem(itemBytes, level.registryAccess()));
 		container.setChanged();
 		return true;
 	}
 
-	private boolean restoreInventory(ConsequenceRecord consequence) {
-		return applyInventory(consequence, consequence.before());
-	}
-
-	private boolean applyInventory(ConsequenceRecord consequence, byte[] itemBytes) {
-		ServerPlayer player = playerFromSubject(consequence);
-		if (player == null) {
-			return false;
+	private boolean discardItem(ConsequenceRecord consequence) {
+		Entity entity = findEntity(consequence.subject());
+		if (entity != null) {
+			entity.discard();
 		}
-		int slot = slotIndex(consequence.subject());
-		if (slot < 0 || slot >= player.getInventory().getContainerSize()) {
-			return false;
+		CtrlZServer hub = CtrlZServer.get();
+		if (hub != null && consequence.after().length == 0) {
+			// Re-applying a pickup: the item is inside an inventory again.
+			hub.markPickedUp(consequence.subject());
 		}
-		ItemStack stack = Snapshots.decodeSingleItem(itemBytes, player.level().registryAccess());
-		player.getInventory().setItem(slot, stack);
-		player.getInventory().setChanged();
 		return true;
 	}
 
-	private boolean restoreItemEntity(ConsequenceRecord consequence) {
+	/**
+	 * Brings an item entity back. It keeps the UUID it had when it was recorded, so that undoing
+	 * the activity that originally dropped it still finds and removes this very entity.
+	 */
+	private boolean spawnItem(ConsequenceRecord consequence, byte[] itemBytes, boolean freshSpawn) {
 		ServerLevel level = level(consequence.dimension());
-		if (level == null) {
+		if (level == null || !consequence.hasPosition()) {
 			return false;
 		}
-		if (consequence.after().length > 0) {
-			Entity entity = findEntity(consequence.subject());
-			if (entity != null) {
-				entity.discard();
-			}
+		ItemStack stack = Snapshots.decodeSingleItem(itemBytes, level.registryAccess());
+		if (stack.isEmpty()) {
 			return true;
 		}
-		if (consequence.before().length > 0 && consequence.hasPosition()) {
-			BlockPos pos = posOf(consequence);
-			ItemStack stack = Snapshots.decodeSingleItem(consequence.before(), level.registryAccess());
-			if (stack.isEmpty()) {
-				return true;
+		BlockPos pos = posOf(consequence);
+		ItemEntity entity = new ItemEntity(level, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5, stack);
+		try {
+			UUID uuid = UUID.fromString(consequence.subject());
+			if (level.getEntity(uuid) == null) {
+				entity.setUUID(uuid);
 			}
-			ItemEntity itemEntity = new ItemEntity(level, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
-					stack);
-			itemEntity.setPickUpDelay(0);
-			level.addFreshEntity(itemEntity);
+		} catch (IllegalArgumentException ignored) {
 		}
-		return true;
-	}
-
-	private boolean reapplyItemEntity(ConsequenceRecord consequence) {
-		if (consequence.after().length > 0 && consequence.hasPosition()) {
-			ServerLevel level = level(consequence.dimension());
-			if (level == null) {
-				return false;
-			}
-			BlockPos pos = posOf(consequence);
-			ItemStack stack = Snapshots.decodeSingleItem(consequence.after(), level.registryAccess());
-			if (!stack.isEmpty()) {
-				level.addFreshEntity(new ItemEntity(level, pos.getX() + 0.5, pos.getY() + 0.5, pos.getZ() + 0.5,
-						stack));
-			}
+		// Long enough that a player standing on the spot does not instantly pick it up again.
+		entity.setPickUpDelay(60);
+		boolean added = level.addFreshEntity(entity);
+		CtrlZServer hub = CtrlZServer.get();
+		if (added && !freshSpawn && hub != null) {
+			hub.unmarkPickedUp(consequence.subject());
 		}
-		return true;
-	}
-
-	private boolean restoreHealth(ConsequenceRecord consequence) {
-		return applyHealth(consequence, consequence.before());
+		return added;
 	}
 
 	private boolean applyHealth(ConsequenceRecord consequence, byte[] healthBytes) {
@@ -255,6 +315,34 @@ public final class ServerRestorer implements ConsequenceRestorer {
 			return false;
 		}
 		return true;
+	}
+
+	private boolean applyPlayer(ConsequenceRecord consequence, byte[] positionBytes) {
+		ServerPlayer player = playerFromSubject(consequence.subject());
+		ServerLevel level = level(consequence.dimension());
+		double[] position = parsePosition(positionBytes);
+		if (player == null || level == null || position == null) {
+			return false;
+		}
+		boolean moved = player.teleportTo(level, position[0], position[1], position[2], Set.of(), player.getYRot(),
+				player.getXRot(), true);
+		// Falling back to the start must not hurt, and old momentum must not carry on.
+		player.resetFallDistance();
+		player.setDeltaMovement(Vec3.ZERO);
+		return moved;
+	}
+
+	private static double[] parsePosition(byte[] bytes) {
+		try {
+			String[] parts = new String(bytes, StandardCharsets.UTF_8).split(";");
+			if (parts.length != 3) {
+				return null;
+			}
+			return new double[] { Double.parseDouble(parts[0]), Double.parseDouble(parts[1]),
+					Double.parseDouble(parts[2]) };
+		} catch (NumberFormatException e) {
+			return null;
+		}
 	}
 
 	private Entity findEntity(String uuidText) {
@@ -271,15 +359,14 @@ public final class ServerRestorer implements ConsequenceRestorer {
 		return null;
 	}
 
-	private ServerPlayer playerFromSubject(ConsequenceRecord consequence) {
-		String[] parts = consequence.subject().split("#");
-		if (parts.length < 3 || !"inv".equals(parts[0])) {
+	/** Subjects look like {@code inv#<uuid>#<slot>}, {@code ender#<uuid>#<slot>} or {@code player#<uuid>}. */
+	private ServerPlayer playerFromSubject(String subject) {
+		String[] parts = subject.split("#");
+		if (parts.length < 2 || !("inv".equals(parts[0]) || "ender".equals(parts[0]) || "player".equals(parts[0]))) {
 			return null;
 		}
 		try {
-			UUID uuid = UUID.fromString(parts[1]);
-			ServerPlayer player = server.getPlayerList().getPlayer(uuid);
-			return player;
+			return server.getPlayerList().getPlayer(UUID.fromString(parts[1]));
 		} catch (IllegalArgumentException e) {
 			return null;
 		}

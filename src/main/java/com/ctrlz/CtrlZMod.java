@@ -28,7 +28,10 @@ public final class CtrlZMod implements ModInitializer {
 		RecorderEvents.register();
 		NetHandler.register();
 
-		ServerLifecycleEvents.SERVER_STARTED.register(server -> CtrlZServer.start(server));
+		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			verifyMixinTargets();
+			CtrlZServer.start(server);
+		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> CtrlZServer.stop());
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
 			CtrlZServer hub = CtrlZServer.get();
@@ -44,6 +47,33 @@ public final class CtrlZMod implements ModInitializer {
 		});
 
 		LOGGER.info("CtrlZ activity recorder ready");
+	}
+
+	/**
+	 * Mixins are applied when their target class is first defined. A server without players never
+	 * loads {@code ServerPlayer}, so a wrong injection point would stay hidden until somebody joins.
+	 * Defining every target now (without running static initialisers) makes it fail at startup.
+	 */
+	private static void verifyMixinTargets() {
+		String[] targets = {
+				"net.minecraft.world.level.Level",
+				"net.minecraft.server.level.ServerLevel",
+				"net.minecraft.server.level.ServerPlayer",
+				"net.minecraft.world.entity.player.Player",
+				"net.minecraft.world.entity.LivingEntity",
+				"net.minecraft.world.entity.item.ItemEntity",
+				"net.minecraft.world.inventory.AbstractContainerMenu"
+		};
+		int verified = 0;
+		for (String target : targets) {
+			try {
+				Class.forName(target, false, CtrlZMod.class.getClassLoader());
+				verified++;
+			} catch (ClassNotFoundException | LinkageError e) {
+				LOGGER.error("CtrlZ mixin target {} could not be loaded", target, e);
+			}
+		}
+		LOGGER.info("CtrlZ verified {}/{} mixin targets", verified, targets.length);
 	}
 }
 

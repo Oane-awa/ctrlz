@@ -78,6 +78,7 @@ public final class ConfigScreen extends Screen implements ClientNet.Refreshable 
 
 	private CtrlZConfig draft;
 	private boolean showNumbers;
+	private boolean requested;
 
 	public ConfigScreen() {
 		super(Component.translatable("ctrlz.gui.config"));
@@ -85,7 +86,8 @@ public final class ConfigScreen extends Screen implements ClientNet.Refreshable 
 
 	@Override
 	protected void init() {
-		if (ClientNet.config() == null) {
+		if (!requested) {
+			requested = true;
 			ClientNet.requestConfig();
 		}
 		if (draft == null) {
