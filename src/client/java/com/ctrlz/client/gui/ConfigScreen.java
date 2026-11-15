@@ -60,6 +60,8 @@ public final class ConfigScreen extends Screen implements ClientNet.Refreshable 
 
 		NUMBERS.add(new Number("ctrlz.config.movementMergeGapTicks", 10, 200, 5, (c, d) -> c.movementMergeGapTicks,
 				(c, v) -> c.movementMergeGapTicks = v));
+		NUMBERS.add(new Number("ctrlz.config.movementStopTicks", 2, 100, 2, (c, d) -> c.movementStopTicks,
+				(c, v) -> c.movementStopTicks = v));
 		NUMBERS.add(new Number("ctrlz.config.checkpointIntervalTicks", 20, 1200, 20,
 				(c, d) -> c.checkpointIntervalTicks, (c, v) -> c.checkpointIntervalTicks = v));
 		NUMBERS.add(new Number("ctrlz.config.autosaveSeconds", 5, 600, 5, (c, d) -> c.autosaveSeconds,

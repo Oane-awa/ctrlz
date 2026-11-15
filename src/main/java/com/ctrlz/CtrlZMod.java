@@ -1,20 +1,31 @@
 package com.ctrlz;
 
+import com.ctrlz.command.UndoHistoryCommand;
+import com.ctrlz.config.CtrlZConfig;
+import com.ctrlz.engine.EngineRouter;
 import com.ctrlz.net.CtrlZPayload;
 import com.ctrlz.server.CtrlZServer;
 import com.ctrlz.server.NetHandler;
 import com.ctrlz.server.RecorderEvents;
+import com.ctrlz.v2.V2Events;
+import com.ctrlz.v2.V2UndoService;
+import com.ctrlz.v2.net.UndoRequestPayload;
+import com.ctrlz.v2.net.UndoResultPayload;
+import com.ctrlz.v2.net.V2ServerNet;
 import net.fabricmc.api.ModInitializer;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerLifecycleEvents;
 import net.fabricmc.fabric.api.event.lifecycle.v1.ServerTickEvents;
 import net.fabricmc.fabric.api.networking.v1.PayloadTypeRegistry;
 import net.fabricmc.fabric.api.networking.v1.ServerPlayConnectionEvents;
+import net.fabricmc.loader.api.FabricLoader;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Path;
+
 /**
- * Entry point: registers the packet types, the server lifecycle hooks, the recording events and the
- * authoritative server core.
+ * Entry point. The engine is resolved exactly once, before anything is registered, and only that
+ * engine's hooks, packet types and handlers are wired up.
  */
 public final class CtrlZMod implements ModInitializer {
 	public static final String MOD_ID = "ctrlz";
@@ -22,6 +33,47 @@ public final class CtrlZMod implements ModInitializer {
 
 	@Override
 	public void onInitialize() {
+		Path configPath = FabricLoader.getInstance().getConfigDir().resolve("ctrlz.json");
+		CtrlZConfig startupConfig = CtrlZConfig.load(configPath);
+		EngineRouter.resolve(EngineRouter.Engine.parse(startupConfig.engine));
+		LOGGER.info("CtrlZ engine source: {} (engine={})", configPath.toAbsolutePath(),
+				EngineRouter.active().id());
+
+		UndoHistoryCommand.register();
+
+		if (!startupConfig.enabled) {
+			LOGGER.info("CtrlZ is disabled in config/ctrlz.json; no recording hook is registered");
+			return;
+		}
+
+		if (EngineRouter.isV2()) {
+			registerV2(startupConfig);
+		} else {
+			registerLegacy();
+		}
+
+		LOGGER.info("CtrlZ ready (engine={})", EngineRouter.active().id());
+	}
+
+	private static void registerV2(CtrlZConfig config) {
+		PayloadTypeRegistry.serverboundPlay().register(UndoRequestPayload.TYPE, UndoRequestPayload.CODEC);
+		PayloadTypeRegistry.clientboundPlay().register(UndoResultPayload.TYPE, UndoResultPayload.CODEC);
+		V2Events.register();
+		V2ServerNet.register();
+		V2UndoService.configure(config);
+
+		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
+			verifyMixinTargets();
+			V2UndoService.start(server);
+			V2UndoService.logActiveEngine();
+		});
+		ServerLifecycleEvents.SERVER_STOPPING.register(server -> V2UndoService.stop());
+		ServerTickEvents.END_SERVER_TICK.register(server -> V2UndoService.tick());
+		ServerPlayConnectionEvents.DISCONNECT.register((handler, server) ->
+				V2UndoService.onPlayerLeft(handler.player.getUUID()));
+	}
+
+	private static void registerLegacy() {
 		PayloadTypeRegistry.serverboundPlay().register(CtrlZPayload.TYPE, CtrlZPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(CtrlZPayload.TYPE, CtrlZPayload.CODEC);
 
@@ -31,6 +83,7 @@ public final class CtrlZMod implements ModInitializer {
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			verifyMixinTargets();
 			CtrlZServer.start(server);
+			V2UndoService.logActiveEngine();
 		});
 		ServerLifecycleEvents.SERVER_STOPPING.register(server -> CtrlZServer.stop());
 		ServerTickEvents.END_SERVER_TICK.register(server -> {
@@ -45,8 +98,6 @@ public final class CtrlZMod implements ModInitializer {
 				hub.onPlayerLeft(handler.player.getUUID());
 			}
 		});
-
-		LOGGER.info("CtrlZ activity recorder ready");
 	}
 
 	/**
@@ -76,4 +127,3 @@ public final class CtrlZMod implements ModInitializer {
 		LOGGER.info("CtrlZ verified {}/{} mixin targets", verified, targets.length);
 	}
 }
-

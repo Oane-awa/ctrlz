@@ -49,6 +49,9 @@ public final class CtrlZServer {
 	private long lastAutosaveMillis;
 	private int suppressionDepth;
 	private final Map<UUID, Long> lastRollbackMillis = new ConcurrentHashMap<>();
+	/** Activities that just failed their state check, so pressing Z again moves on instead of looping. */
+	private final Map<Long, Integer> conflictedUntilTick = new java.util.concurrent.ConcurrentHashMap<>();
+	private final java.util.Set<UUID> rollbackInProgress = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 	private CtrlZServer(MinecraftServer server) {
 		this.server = server;
@@ -134,10 +137,11 @@ public final class CtrlZServer {
 	}
 
 	public ActivitySession session(ServerPlayer player) {
+		// A walk ends as soon as the player really stopped; the merge setting only caps that window.
+		int stopTicks = Math.max(2, Math.min(config.movementStopTicks, config.movementMergeGapTicks));
 		return sessions.computeIfAbsent(player.getUUID(), id -> new ActivitySession(id,
-				player.getGameProfile().name(), player.level().dimension().identifier().toString(),
-				config.movementMergeGapTicks, config.checkpointIntervalTicks, this::allocateActivityId,
-				new StoreSink()));
+				player.getGameProfile().name(), player.level().dimension().identifier().toString(), stopTicks,
+				config.checkpointIntervalTicks, this::allocateActivityId, new StoreSink()));
 	}
 
 	private long allocateActivityId() {
@@ -162,6 +166,7 @@ public final class CtrlZServer {
 		}
 		ActivityRecord activity = currentActivity(player);
 		if (activity == null) {
+			lastInventories.put(player.getUUID(), current);
 			return;
 		}
 		ServerLevelContext context = new ServerLevelContext(player.level(), player.level().dimension().identifier()
@@ -200,6 +205,8 @@ public final class CtrlZServer {
 			}
 			Vec3 position = player.position();
 			Vec3 previous = lastPositions.put(player.getUUID(), position);
+			Vec3 delta = player.getDeltaMovement();
+			double horizontalSpeedSqr = delta.x * delta.x + delta.z * delta.z;
 			// Only a real displacement is movement. Feeding every tick used to keep a MOVE open
 			// forever and seal every other action one tick after it started.
 			if (config.recordMovement && previous != null && previous.distanceToSqr(position) > 1.0E-4) {
@@ -212,7 +219,7 @@ public final class CtrlZServer {
 				session.observeMovement(new ActivitySession.Sample(tick, position.x, position.y, position.z,
 						player.isSprinting(), player.isShiftKeyDown(), player.onGround()));
 			}
-			session.tick(tick);
+			session.tick(tick, horizontalSpeedSqr);
 			tickInventory(player);
 		}
 		long now = System.currentTimeMillis();
@@ -339,6 +346,32 @@ public final class CtrlZServer {
 		}
 	}
 
+	/** Marks an activity whose state check failed; the next rollback attempt skips it for a while. */
+	public void markConflicted(long activityId) {
+		conflictedUntilTick.put(activityId, currentTick() + 200);
+	}
+
+	public boolean isConflicted(long activityId) {
+		Integer until = conflictedUntilTick.get(activityId);
+		if (until == null) {
+			return false;
+		}
+		if (currentTick() > until) {
+			conflictedUntilTick.remove(activityId);
+			return false;
+		}
+		return true;
+	}
+
+	/** Re-entrancy guard: one rollback per player at a time, no matter how fast Z is pressed. */
+	public boolean tryBeginRollback(UUID playerId) {
+		return rollbackInProgress.add(playerId);
+	}
+
+	public void endRollback(UUID playerId) {
+		rollbackInProgress.remove(playerId);
+	}
+
 	/** Forgets the inventory/position baselines so a rollback is never recorded as a new activity. */
 	public void resyncBaselines() {
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
@@ -401,7 +434,9 @@ public final class CtrlZServer {
 
 	public ActivityRecord currentActivity(ServerPlayer player) {
 		ActivitySession session = sessions.get(player.getUUID());
-		return session == null ? null : session.current();
+		// Actions only: attaching item or block changes to a walk would make "undo the walk"
+		// modify the inventory, which the recorded semantics forbid.
+		return session == null ? null : session.actionForConsequences(currentTick(), 3);
 	}
 
 	/**
@@ -507,11 +542,17 @@ public final class CtrlZServer {
 		int y = ByteIO.unpackY(packedPos);
 		int z = ByteIO.unpackZ(packedPos);
 		CausalLink best = null;
+		int bestRank = Integer.MAX_VALUE;
 		int bestDistance = Integer.MAX_VALUE;
+		long bestActivity = Long.MIN_VALUE;
 		for (CausalWindow window : windows.values()) {
 			if (!dimension.equals(window.dimension) || tick > window.expiresTick) {
 				continue;
 			}
+			ActivityRecord owner = store.byId(window.owner);
+			// An activity that is still being recorded is the one the player is doing right now, so
+			// it must win over an older activity whose window is still open.
+			int rank = owner != null && owner.status() == ActivityStatus.RECORDING ? 0 : 1;
 			for (Map.Entry<Long, Long> entry : window.touched.entrySet()) {
 				int dx = Math.abs(ByteIO.unpackX(entry.getKey()) - x);
 				int dy = Math.abs(ByteIO.unpackY(entry.getKey()) - y);
@@ -520,10 +561,13 @@ public final class CtrlZServer {
 					continue;
 				}
 				int distance = dx + dy + dz;
-				boolean closer = distance < bestDistance;
-				boolean newer = distance == bestDistance && best != null && entry.getValue() > best.parentConsequenceId();
-				if (best == null || closer || newer) {
+				boolean better = best == null || rank < bestRank
+						|| (rank == bestRank && (distance < bestDistance
+								|| (distance == bestDistance && window.owner > bestActivity)));
+				if (better) {
+					bestRank = rank;
 					bestDistance = distance;
+					bestActivity = window.owner;
 					best = new CausalLink(window.owner, entry.getValue(),
 							distance == 0 ? ConsequenceOrigin.DIRECT : ConsequenceOrigin.INDIRECT);
 				}

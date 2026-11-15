@@ -1,6 +1,6 @@
 package com.ctrlz.mixin;
 
-import com.ctrlz.server.Hooks;
+import com.ctrlz.engine.EngineRouter;
 import net.minecraft.core.BlockPos;
 import net.minecraft.world.level.Level;
 import net.minecraft.world.level.block.state.BlockState;
@@ -19,13 +19,14 @@ public abstract class LevelMixin {
 	@Inject(method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z", at = @At("HEAD"))
 	private void ctrlz$beforeSetBlock(BlockPos pos, BlockState state, int flags, int recursion,
 			CallbackInfoReturnable<Boolean> info) {
-		Hooks.beforeSetBlock((Level) (Object) this, pos, ((Level) (Object) this).getBlockState(pos));
+		EngineRouter.routeSetBlockBefore((Level) (Object) this, pos,
+				((Level) (Object) this).getBlockState(pos));
 	}
 
 	@Inject(method = "setBlock(Lnet/minecraft/core/BlockPos;Lnet/minecraft/world/level/block/state/BlockState;II)Z", at = @At("RETURN"))
 	private void ctrlz$afterSetBlock(BlockPos pos, BlockState state, int flags, int recursion,
 			CallbackInfoReturnable<Boolean> info) {
-		Hooks.afterSetBlock((Level) (Object) this, pos, ((Level) (Object) this).getBlockState(pos));
+		EngineRouter.routeSetBlockAfter((Level) (Object) this, pos, ((Level) (Object) this).getBlockState(pos));
 	}
 }
 

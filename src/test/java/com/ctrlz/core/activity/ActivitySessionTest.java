@@ -15,6 +15,11 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
+/**
+ * Encodes the activity lifecycle the rollback logic depends on: one independent action ends the one
+ * before it, a walk ends when the player really stopped, and a placement plus its item use stay one
+ * activity so the block and the consumed item can never end up in different records.
+ */
 class ActivitySessionTest {
 	private final List<ActivityRecord> opened = new ArrayList<>();
 	private final List<ActivityRecord> sealed = new ArrayList<>();
@@ -23,7 +28,7 @@ class ActivitySessionTest {
 	@BeforeEach
 	void setUp() {
 		AtomicLong ids = new AtomicLong();
-		session = new ActivitySession(UUID.randomUUID(), "Steve", "minecraft:overworld", 40, 200, ids::incrementAndGet,
+		session = new ActivitySession(UUID.randomUUID(), "Steve", "minecraft:overworld", 10, 200, ids::incrementAndGet,
 				new ActivitySession.Sink() {
 					@Override
 					public void opened(ActivityRecord record) {
@@ -46,53 +51,71 @@ class ActivitySessionTest {
 	}
 
 	@Test
-	void movementNeverSealsAnOpenAction() {
+	void newActionEndsTheWalkBeforeIt() {
+		ActivityRecord walk = session.observeMovement(at(100, 0));
+		session.observeMovement(at(101, 0.3));
+		ActivityRecord mining = session.observeAction(ActivityKind.BREAK_BLOCK, at(102, 0.6));
+		assertTrue(sealed.contains(walk), "placing or mining after walking ends the walk");
+		assertSame(mining, session.action());
+		assertNull(session.movement());
+	}
+
+	@Test
+	void newMovementEndsTheActionBeforeIt() {
+		ActivityRecord placing = session.observeAction(ActivityKind.PLACE_BLOCK, at(100, 0));
+		session.observeMovement(at(102, 0.4));
+		assertTrue(sealed.contains(placing), "walking right after placing ends the placement record");
+		assertNotNull(session.movement());
+		assertNull(session.action());
+	}
+
+	@Test
+	void differentActionKindsNeverMerge() {
 		ActivityRecord mining = session.observeAction(ActivityKind.BREAK_BLOCK, at(100, 0));
-		// The player keeps walking while the break is still being recorded.
-		for (int tick = 101; tick <= 110; tick++) {
-			session.observeMovement(at(tick, tick * 0.2));
-		}
-		assertSame(mining, session.action(), "walking must not close the mining activity");
-		assertTrue(sealed.stream().noneMatch(record -> record.kind() == ActivityKind.BREAK_BLOCK));
+		ActivityRecord placing = session.observeAction(ActivityKind.PLACE_BLOCK, at(101, 0));
+		assertNotSame(mining, placing);
+		assertTrue(sealed.contains(mining));
+	}
+
+	@Test
+	void placementAndItsItemUseStayOneActivity() {
+		ActivityRecord placing = session.observeAction(ActivityKind.PLACE_BLOCK, at(100, 0));
+		ActivityRecord use = session.observeAction(ActivityKind.USE_ITEM, at(100, 0));
+		assertSame(placing, use, "one right click must produce exactly one activity");
+		assertEquals(1, opened.size());
+		assertEquals(ActivityKind.PLACE_BLOCK, session.action().kind());
+	}
+
+	@Test
+	void repeatedBreaksInsideTheWindowMerge() {
+		ActivityRecord first = session.observeAction(ActivityKind.BREAK_BLOCK, at(100, 0));
+		ActivityRecord second = session.observeAction(ActivityKind.BREAK_BLOCK, at(120, 0));
+		assertSame(first, second);
+		assertEquals(1, opened.size());
+	}
+
+	@Test
+	void walkEndsWhenThePlayerReallyStopped() {
+		session.observeMovement(at(100, 0));
+		session.observeMovement(at(101, 0.3));
+		session.tick(105, 0.0);
+		assertNotNull(session.movement(), "a pause shorter than the stop window keeps the walk open");
+		session.tick(120, 0.0);
+		assertNull(session.movement());
+		assertEquals(1, sealed.size());
+	}
+
+	@Test
+	void slidingOrKnockBackKeepsTheWalkOpen() {
+		session.observeMovement(at(100, 0));
+		session.observeMovement(at(101, 0.3));
+		// No new displacement, but the player is still moving fast: the walk has not ended yet.
+		session.tick(120, 0.02);
 		assertNotNull(session.movement());
 	}
 
 	@Test
-	void movementAndActionAreTwoSeparateActivities() {
-		session.observeMovement(at(100, 0));
-		ActivityRecord action = session.observeAction(ActivityKind.PLACE_BLOCK, at(101, 0));
-		assertNotSame(session.movement(), action);
-		assertEquals(ActivityKind.MOVE, session.movement().kind());
-		assertEquals(ActivityKind.PLACE_BLOCK, action.kind());
-		assertSame(action, session.current(), "new consequences belong to the action, not to the walk");
-	}
-
-	@Test
-	void changingDirectionKeepsOneMovementActivity() {
-		ActivityRecord first = session.observeMovement(at(100, 0));
-		for (int tick = 101; tick < 140; tick++) {
-			session.observeMovement(new ActivitySession.Sample(tick, tick < 120 ? (tick - 100) * 0.2 : 4.0, 64.0,
-					tick < 120 ? 0.0 : (tick - 120) * 0.2, true, false, true));
-		}
-		assertSame(first, session.movement());
-		assertEquals(1, opened.size());
-		assertTrue(first.distanceBlocks() > 7.0, "distance must include both legs of the walk");
-	}
-
-	@Test
-	void idleMovementIsSealedAfterTheMergeGap() {
-		session.observeMovement(at(100, 0));
-		session.observeMovement(at(101, 0.2));
-		session.tick(120);
-		assertNotNull(session.movement(), "a short pause is still the same walk");
-		session.tick(150);
-		assertNull(session.movement());
-		assertEquals(1, sealed.size());
-		assertEquals(ActivityKind.MOVE, sealed.get(0).kind());
-	}
-
-	@Test
-	void teleportStartsANewActivityAndIsNotCountedAsWalking() {
+	void teleportSplitsTheWalkAndIsNotCountedAsDistance() {
 		ActivityRecord before = session.observeMovement(at(100, 0));
 		session.observeMovement(at(101, 0.2));
 		ActivityRecord after = session.observeMovement(at(102, 500.0));
@@ -102,34 +125,27 @@ class ActivitySessionTest {
 	}
 
 	@Test
-	void sameActionWithinWindowMerges() {
-		ActivityRecord first = session.observeAction(ActivityKind.BREAK_BLOCK, at(100, 0));
-		ActivityRecord second = session.observeAction(ActivityKind.BREAK_BLOCK, at(130, 0));
-		assertSame(first, second);
-		assertEquals(1, opened.size());
+	void actionKeepsOwningConsequencesRightAfterItWasSealed() {
+		ActivityRecord placing = session.observeAction(ActivityKind.PLACE_BLOCK, at(100, 0));
+		session.observeMovement(at(101, 0.3));
+		assertNull(session.action());
+		// The inventory change that pays for the placement is only visible on the next tick.
+		assertSame(placing, session.actionForConsequences(102, 3));
+		assertNull(session.actionForConsequences(120, 3), "the grace period must not last forever");
 	}
 
 	@Test
-	void anotherKindOfActionSealsThePreviousOne() {
-		ActivityRecord mining = session.observeAction(ActivityKind.BREAK_BLOCK, at(100, 0));
-		session.observeAction(ActivityKind.PLACE_BLOCK, at(110, 0));
-		assertTrue(sealed.contains(mining));
+	void walkHasNoActionSoInventoryChangesCannotAttachToIt() {
+		session.observeMovement(at(100, 0));
+		session.observeMovement(at(101, 0.3));
+		assertNull(session.actionForConsequences(102, 3));
 	}
 
 	@Test
 	void flushSealsEverythingThatIsOpen() {
-		session.observeMovement(at(100, 0));
-		session.observeAction(ActivityKind.USE_ITEM, at(101, 0));
-		session.flush(102);
-		assertNull(session.movement());
+		session.observeAction(ActivityKind.USE_ITEM, at(100, 0));
+		session.flush(101);
 		assertNull(session.action());
-		assertEquals(2, sealed.size());
-	}
-
-	@Test
-	void useItemClicksInQuickSuccessionMerge() {
-		ActivityRecord first = session.observeAction(ActivityKind.USE_ITEM, at(100, 0));
-		ActivityRecord second = session.observeAction(ActivityKind.USE_ITEM, at(102, 0));
-		assertSame(first, second, "block use and item use of one click must be one activity");
+		assertEquals(1, sealed.size());
 	}
 }

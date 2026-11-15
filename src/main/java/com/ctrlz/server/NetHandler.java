@@ -46,12 +46,20 @@ public final class NetHandler {
 					send(context, Messages.S2C_ROLLBACK_RESULT,
 							new Messages.RollbackResultDto(result.success(), result.restored(), result.conflict(),
 									result.messageKey()));
+					if (!result.success()) {
+						player.sendOverlayMessage(Component.translatable(result.messageKey()));
+					}
 				}
 				case Messages.C2S_ROLLBACK_LAST -> {
 					RollbackService.Result result = RollbackService.rollbackLast(player);
 					send(context, Messages.S2C_ROLLBACK_RESULT,
 							new Messages.RollbackResultDto(result.success(), result.restored(), result.conflict(),
 									result.messageKey()));
+					// The hotkey is pressed without any screen open, so the outcome has to be visible
+					// on the action bar; otherwise a refused rollback looks like nothing happened.
+					if (!result.success()) {
+						player.sendOverlayMessage(Component.translatable(result.messageKey()));
+					}
 				}
 				case Messages.C2S_REQUEST_CONFIG -> send(context, Messages.S2C_CONFIG,
 						new Messages.ConfigDto(configJson()));

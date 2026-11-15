@@ -15,6 +15,14 @@ import java.nio.file.Path;
 public final class CtrlZConfig {
 	private static final Gson GSON = new GsonBuilder().setPrettyPrinting().create();
 
+	/**
+	 * Which recording engine is active: {@code "legacy"} or {@code "v2"}.
+	 *
+	 * <p>Read once at startup, never hot switched. Both engines live in the jar, but only the
+	 * selected one registers its hooks, so the world never sees double recording.
+	 */
+	public String engine = "legacy";
+
 	public boolean enabled = true;
 
 	public boolean recordMovement = true;
@@ -37,6 +45,8 @@ public final class CtrlZConfig {
 	public boolean captureScheduledTicks = true;
 
 	public int movementMergeGapTicks = 40;
+	/** How long a standstill must last before the walk is considered finished. */
+	public int movementStopTicks = 10;
 	public int checkpointIntervalTicks = 200;
 	public int autosaveSeconds = 30;
 
@@ -76,7 +86,13 @@ public final class CtrlZConfig {
 	}
 
 	public void validate() {
+		if (!"legacy".equalsIgnoreCase(engine) && !"v2".equalsIgnoreCase(engine)) {
+			engine = "legacy";
+		} else {
+			engine = engine.toLowerCase(java.util.Locale.ROOT);
+		}
 		movementMergeGapTicks = clamp(movementMergeGapTicks, 10, 200);
+		movementStopTicks = clamp(movementStopTicks, 2, 100);
 		checkpointIntervalTicks = clamp(checkpointIntervalTicks, 20, 6000);
 		autosaveSeconds = clamp(autosaveSeconds, 5, 600);
 		historyPageSize = clamp(historyPageSize, 5, 50);

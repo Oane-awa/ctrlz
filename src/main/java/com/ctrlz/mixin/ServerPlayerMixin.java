@@ -1,7 +1,6 @@
 package com.ctrlz.mixin;
 
-import com.ctrlz.server.Hooks;
-import com.ctrlz.server.Recorder;
+import com.ctrlz.engine.EngineRouter;
 import net.minecraft.server.level.ServerPlayer;
 import net.minecraft.world.MenuProvider;
 import net.minecraft.world.entity.item.ItemEntity;
@@ -18,7 +17,7 @@ public abstract class ServerPlayerMixin {
 	@Inject(method = "openMenu(Lnet/minecraft/world/MenuProvider;)Ljava/util/OptionalInt;", at = @At("RETURN"))
 	private void ctrlz$onOpenMenu(MenuProvider provider, CallbackInfoReturnable<OptionalInt> info) {
 		if (info.getReturnValue().isPresent()) {
-			Recorder.onContainerOpened((ServerPlayer) (Object) this);
+			EngineRouter.routeMenuOpened((ServerPlayer) (Object) this);
 		}
 	}
 
@@ -29,13 +28,13 @@ public abstract class ServerPlayerMixin {
 	@Inject(method = "drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;", at = @At("HEAD"))
 	private void ctrlz$beforeDrop(ItemStack stack, boolean dropAround, boolean thrower,
 			CallbackInfoReturnable<ItemEntity> info) {
-		Hooks.beginPlayerDrop();
+		EngineRouter.routePlayerDropBegin();
 	}
 
 	@Inject(method = "drop(Lnet/minecraft/world/item/ItemStack;ZZ)Lnet/minecraft/world/entity/item/ItemEntity;", at = @At("RETURN"))
 	private void ctrlz$afterDrop(ItemStack stack, boolean dropAround, boolean thrower,
 			CallbackInfoReturnable<ItemEntity> info) {
-		Hooks.endPlayerDrop((ServerPlayer) (Object) this, stack, info.getReturnValue());
+		EngineRouter.routePlayerDropEnd((ServerPlayer) (Object) this, stack, info.getReturnValue());
 	}
 }
 

@@ -62,6 +62,30 @@ public enum ActivityKind {
 		return other != null && group == other.group && group != MergeGroup.NONE && this == other;
 	}
 
+	/**
+	 * True when both kinds are produced by the same physical player action and must therefore stay
+	 * in one activity record.
+	 *
+	 * <p>Placing a block fires {@code UseBlockCallback} and then {@code UseItemCallback}, and taking
+	 * a crafting result reports both a slot move and a craft. Splitting those into two activities
+	 * used to leave the block change in one record and the item consumption in the other, so undoing
+	 * one of them restored only half of the action.
+	 */
+	public boolean samePlayerActionAs(ActivityKind other) {
+		if (other == null) {
+			return false;
+		}
+		if (this == other) {
+			return true;
+		}
+		return (this == PLACE_BLOCK && other == USE_ITEM) || (this == USE_ITEM && other == PLACE_BLOCK)
+				|| (this == MOVE_ITEM && other == CRAFT) || (this == CRAFT && other == MOVE_ITEM);
+	}
+
+	public boolean isMovementKind() {
+		return group == MergeGroup.MOVEMENT;
+	}
+
 	public static ActivityKind byId(int id) {
 		for (ActivityKind kind : values()) {
 			if (kind.id == id) {

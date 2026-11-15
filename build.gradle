@@ -23,6 +23,27 @@ loom {
 			sourceSet sourceSets.client
 		}
 	}
+
+	runs {
+		// Fabric API gametest runner: `gradlew runGametest` writes build/gametest.xml.
+		// GameTest classes must live inside the mod's own source set, otherwise Fabric's
+		// test locator cannot associate them with a mod and silently skips them.
+		gametest {
+			server()
+			name = "Game Test"
+			vmArg "-Dfabric-api.gametest"
+			vmArg "-Dfabric-api.gametest.report-file=${project.buildDir}/gametest.xml"
+			runDir "build/gametest"
+		}
+	}
+}
+
+// Unit tests need the game and Fabric API on their classpath.
+sourceSets {
+	test {
+		compileClasspath += sourceSets.main.compileClasspath
+		runtimeClasspath += sourceSets.main.runtimeClasspath
+	}
 }
 
 dependencies {

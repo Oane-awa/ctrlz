@@ -9,6 +9,8 @@ import com.ctrlz.core.rollback.ConflictType;
 import com.ctrlz.core.rollback.ConsequenceCollapser;
 import com.ctrlz.core.rollback.RollbackEngine;
 import com.ctrlz.core.rollback.RollbackListener;
+import com.ctrlz.core.util.ByteIO;
+import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 
@@ -35,6 +37,23 @@ public final class RollbackService {
 		if (hub == null || hub.store() == null) {
 			return new Result(false, 0, "unavailable", "ctrlz.result.no_store");
 		}
+		// Everything below touches world state, so it must run on the server thread.
+		if (!hub.server().isSameThread()) {
+			hub.server().execute(() -> rollback(actor, activityId));
+			return new Result(false, 0, "busy", "ctrlz.result.busy");
+		}
+		if (!hub.tryBeginRollback(actor.getUUID())) {
+			// Fast repeated presses must never run the same transaction twice.
+			return new Result(false, 0, "busy", "ctrlz.result.busy");
+		}
+		try {
+			return rollbackNow(actor, hub, activityId);
+		} finally {
+			hub.endRollback(actor.getUUID());
+		}
+	}
+
+	private static Result rollbackNow(ServerPlayer actor, CtrlZServer hub, long activityId) {
 		ActivityRecord activity = hub.store().byId(activityId);
 		if (activity == null) {
 			return new Result(false, 0, "missing", "ctrlz.result.not_found");
@@ -61,6 +80,11 @@ public final class RollbackService {
 		if (consequences.isEmpty()) {
 			return new Result(false, 0, "empty", "ctrlz.result.nothing_to_rollback");
 		}
+		Result incomplete = checkStructures(consequences);
+		if (incomplete != null) {
+			hub.markConflicted(activityId);
+			return incomplete;
+		}
 		if (hub.config().useMineTracerAudit) {
 			MineTracerBridge.Audit audit = MineTracerBridge.audit(activity, consequences);
 			if (audit.conflict()) {
@@ -72,8 +96,50 @@ public final class RollbackService {
 	}
 
 	/**
-	 * Newest rollbackable activity of the player. Activities without any recorded consequence are
-	 * skipped: "rolling them back" would report success while changing nothing.
+	 * A structure whose other half is not part of this transaction may not be restored: putting back
+	 * half a bed or a door leaves a broken block that can no longer be undone. Refusing with a clear
+	 * reason is the only safe outcome, a multi block structure is never restored partially.
+	 */
+	private static Result checkStructures(List<ConsequenceRecord> consequences) {
+		Set<Long> positions = new HashSet<>();
+		for (ConsequenceRecord consequence : consequences) {
+			if (consequence.kind() == ConsequenceKind.BLOCK_STATE && consequence.hasPosition()) {
+				positions.add(consequence.packedPos());
+			}
+		}
+		for (ConsequenceRecord consequence : consequences) {
+			if (consequence.kind() != ConsequenceKind.BLOCK_STATE || !consequence.hasPosition()) {
+				continue;
+			}
+			net.minecraft.world.level.block.state.BlockState state = Snapshots
+					.decodeBlockState(new String(consequence.before(), java.nio.charset.StandardCharsets.UTF_8));
+			if (state == null) {
+				continue;
+			}
+			BlockPos sibling = Snapshots.siblingPosition(state,
+					new BlockPos(ByteIO.unpackX(consequence.packedPos()), ByteIO.unpackY(consequence.packedPos()),
+							ByteIO.unpackZ(consequence.packedPos())));
+			if (sibling == null) {
+				continue;
+			}
+			if (!positions.contains(ByteIO.packBlockPos(sibling.getX(), sibling.getY(), sibling.getZ()))) {
+				return new Result(false, 0, "incomplete_structure", "ctrlz.result.incomplete_structure");
+			}
+		}
+		return null;
+	}
+
+	/**
+	 * Newest rollbackable <em>action</em> of the player.
+	 *
+	 * <p>Walking is never undone by the hotkey: a walk carries a player position, so undoing it after
+	 * a block operation would teleport the player instead of restoring the block, and waiting a while
+	 * would silently change what the key does. Movement stays available from the history screen,
+	 * where the row is chosen explicitly.
+	 *
+	 * <p>Activities without any consequence are skipped ("rolling them back" would report success
+	 * while changing nothing), and activities whose state check just failed are skipped for a while
+	 * so one conflicting entry cannot disable the hotkey.
 	 */
 	public static Result rollbackLast(ServerPlayer actor) {
 		CtrlZServer hub = CtrlZServer.get();
@@ -81,8 +147,9 @@ public final class RollbackService {
 			return new Result(false, 0, "unavailable", "ctrlz.result.no_store");
 		}
 		hub.flushSession(actor.getUUID());
-		for (ActivityRecord activity : hub.store().recentActivities(actor.getUUID(), 64)) {
-			if (!activity.status().isRollbackCandidate() || hub.store().consequenceCount(activity.id()) == 0) {
+		for (ActivityRecord activity : hub.store().recentActivities(actor.getUUID(), 96)) {
+			if (!activity.status().isRollbackCandidate() || hub.store().consequenceCount(activity.id()) == 0
+					|| hub.isConflicted(activity.id()) || activity.kind().isMovementKind()) {
 				continue;
 			}
 			return rollback(actor, activity.id());
@@ -131,6 +198,9 @@ public final class RollbackService {
 				}
 				return new Result(true, outcome.restored(), "", "ctrlz.result.ok");
 			}
+			// Remember the failure so the hotkey moves on to the next activity instead of retrying
+			// the same impossible one forever.
+			hub.markConflicted(activity.id());
 			// A state conflict is not permanent: the player can undo the newer activity first and
 			// try again. Only what can never be restored is marked as such.
 			if (outcome.conflict() == ConflictType.UNSUPPORTED_MODDED_STATE

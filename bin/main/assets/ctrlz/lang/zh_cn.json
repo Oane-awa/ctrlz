@@ -50,6 +50,7 @@
   "ctrlz.config.useMineTracerFallback": "允许 MineTracer 兜底",
   "ctrlz.config.debugLogging": "调试日志",
   "ctrlz.config.movementMergeGapTicks": "移动合并间隔（刻）",
+  "ctrlz.config.movementStopTicks": "静止多久后结束移动（刻）",
   "ctrlz.config.checkpointIntervalTicks": "检查点间隔（刻）",
   "ctrlz.config.autosaveSeconds": "自动保存间隔（秒）",
   "ctrlz.config.maxActivities": "最大活动数",
@@ -72,6 +73,8 @@
   "ctrlz.result.target_missing": "所需的玩家、容器或维度当前不可用。",
   "ctrlz.result.unsupported": "该活动涉及无法安全恢复的存储，已拒绝回退。",
   "ctrlz.result.no_snapshot": "记录的状态不完整，未做任何恢复。",
+  "ctrlz.result.incomplete_structure": "只记录到多方块结构的一部分，已拒绝回退且未做任何修改。",
+  "ctrlz.result.busy": "已有一次回退正在执行。",
   "ctrlz.reason.unsupported": "包含无法安全恢复的变更。",
 
   "ctrlz.notice.rolled_back": "已回退 %s 项连锁反应。",
@@ -80,5 +83,15 @@
 
   "ctrlz.reason.crash": "服务器在活动结束前关闭。",
   "ctrlz.reason.conflict": "回退时检测到状态冲突。",
-  "ctrlz.reason.audit_conflict": "外部审计后端报告了未记录的变化。"
+  "ctrlz.reason.audit_conflict": "外部审计后端报告了未记录的变化。",
+
+  "ctrlz.v2.undone": "已撤销",
+  "ctrlz.v2.no_history": "没有可撤销的操作",
+  "ctrlz.v2.busy": "已有一次撤销正在执行",
+  "ctrlz.v2.conflict": "该区域已发生其他变化",
+  "ctrlz.v2.audit_failed": "物品守恒校验未通过，已拒绝撤销",
+  "ctrlz.v2.block_unloaded": "目标区域未加载",
+  "ctrlz.v2.not_restorable": "此操作无法恢复",
+  "ctrlz.v2.disabled": "CtrlZ 已禁用",
+  "ctrlz.v2.error": "撤销失败，世界未做任何修改"
 }

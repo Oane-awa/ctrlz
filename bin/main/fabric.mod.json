@@ -17,6 +17,10 @@
     ],
     "client": [
       "com.ctrlz.client.CtrlZClient"
+    ],
+    "fabric-gametest": [
+      "com.ctrlz.gametest.PipelineGameTest",
+      "com.ctrlz.gametest.Slice0GameTest"
     ]
   },
   "mixins": [

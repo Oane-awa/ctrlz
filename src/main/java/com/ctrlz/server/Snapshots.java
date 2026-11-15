@@ -174,6 +174,57 @@ public final class Snapshots {
 		return items.isEmpty() ? ItemStack.EMPTY : items.get(0);
 	}
 
+	/** Reads a block state property by name without depending on the concrete property class. */
+	public static String propertyText(BlockState state, String name) {
+		for (Property<?> property : state.getProperties()) {
+			if (property.getName().equals(name)) {
+				return textOf(state, property);
+			}
+		}
+		return null;
+	}
+
+	@SuppressWarnings("unchecked")
+	private static <T extends Comparable<T>> String textOf(BlockState state, Property<?> property) {
+		return ((Property<T>) property).getName((T) state.getValue((Property<T>) property));
+	}
+
+	/**
+	 * The other half of a two block structure, or null for an ordinary block.
+	 *
+	 * <p>Detected through the state properties ({@code part}, {@code half}) instead of block classes
+	 * so beds, doors and tall plants are all covered, including modded ones that follow vanilla.
+	 */
+	public static BlockPos siblingPosition(BlockState state, BlockPos pos) {
+		String part = propertyText(state, "part");
+		if (part != null) {
+			boolean upper = "head".equals(part) || "upper".equals(part);
+			boolean lower = "foot".equals(part) || "lower".equals(part);
+			if (!upper && !lower) {
+				return null;
+			}
+			net.minecraft.core.Direction facing = facingOf(state);
+			String id = BuiltInRegistries.BLOCK.getKey(state.getBlock()).toString();
+			if (id.endsWith("bed") && facing != null) {
+				return upper ? pos.relative(facing.getOpposite()) : pos.relative(facing);
+			}
+			return upper ? pos.below() : pos.above();
+		}
+		String half = propertyText(state, "half");
+		if (half != null) {
+			return "upper".equals(half) ? pos.below() : pos.above();
+		}
+		return null;
+	}
+
+	private static net.minecraft.core.Direction facingOf(BlockState state) {
+		String facing = propertyText(state, "facing");
+		if (facing == null) {
+			facing = propertyText(state, "direction");
+		}
+		return facing == null ? null : net.minecraft.core.Direction.byName(facing);
+	}
+
 	public static String describe(ItemStack stack) {
 		if (stack == null || stack.isEmpty()) {
 			return "";

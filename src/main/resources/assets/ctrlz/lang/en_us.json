@@ -50,6 +50,7 @@
   "ctrlz.config.useMineTracerFallback": "Allow MineTracer fallback",
   "ctrlz.config.debugLogging": "Debug logging",
   "ctrlz.config.movementMergeGapTicks": "Movement merge gap (ticks)",
+  "ctrlz.config.movementStopTicks": "Standstill before walk ends (ticks)",
   "ctrlz.config.checkpointIntervalTicks": "Checkpoint interval (ticks)",
   "ctrlz.config.autosaveSeconds": "Autosave interval (s)",
   "ctrlz.config.maxActivities": "Max stored activities",
@@ -72,6 +73,8 @@
   "ctrlz.result.target_missing": "A required player, container or dimension is not available.",
   "ctrlz.result.unsupported": "This activity touched storage that cannot be restored safely.",
   "ctrlz.result.no_snapshot": "The recorded state is incomplete, so nothing was restored.",
+  "ctrlz.result.incomplete_structure": "Only part of a multi block structure could be restored, so nothing was changed.",
+  "ctrlz.result.busy": "A rollback is already running.",
   "ctrlz.reason.unsupported": "Contains changes that cannot be restored safely.",
 
   "ctrlz.notice.rolled_back": "Rolled back %s consequence(s).",
@@ -80,5 +83,15 @@
 
   "ctrlz.reason.crash": "Server stopped before the activity finished.",
   "ctrlz.reason.conflict": "State conflict detected during rollback.",
-  "ctrlz.reason.audit_conflict": "External audit backend reported unrecorded changes."
+  "ctrlz.reason.audit_conflict": "External audit backend reported unrecorded changes.",
+
+  "ctrlz.v2.undone": "Undone",
+  "ctrlz.v2.no_history": "Nothing to undo",
+  "ctrlz.v2.busy": "An undo is already running",
+  "ctrlz.v2.conflict": "That area changed since then",
+  "ctrlz.v2.audit_failed": "Item check failed, undo refused",
+  "ctrlz.v2.block_unloaded": "Target area is not loaded",
+  "ctrlz.v2.not_restorable": "This operation cannot be restored",
+  "ctrlz.v2.disabled": "CtrlZ is disabled",
+  "ctrlz.v2.error": "Undo failed, nothing was changed"
 }
