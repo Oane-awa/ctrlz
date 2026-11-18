@@ -108,6 +108,42 @@ class ActivityStoreTest {
 	}
 
 	@Test
+	void deletingNewerRecordsKeepsTheAnchorAndOtherPlayers() throws IOException {
+		UUID alice = UUID.randomUUID();
+		UUID bob = UUID.randomUUID();
+		Path root = tempDir.resolve("truncate");
+		long anchor;
+		try (ActivityStore store = new ActivityStore(root, ActivityStore.Limits.defaults())) {
+			store.open();
+			List<ActivityRecord> aliceRecords = new java.util.ArrayList<>();
+			for (int i = 0; i < 4; i++) {
+				ActivityRecord activity = newActivity(store.allocateActivityId(), alice);
+				store.begin(activity);
+				store.seal(activity);
+				aliceRecords.add(activity);
+			}
+			ActivityRecord bobs = newActivity(store.allocateActivityId(), bob);
+			store.begin(bobs);
+			store.seal(bobs);
+
+			anchor = aliceRecords.get(1).id();
+			assertEquals(2, store.countActivitiesAfter(alice, anchor));
+			assertEquals(2, store.deleteActivitiesAfter(alice, anchor));
+			store.flush(true);
+
+			assertEquals(2, store.recentActivities(alice, 10).size());
+			assertNotNull(store.byId(anchor), "the anchor must never be deleted");
+			assertNotNull(store.byId(bobs.id()), "another player's branch is independent");
+		}
+		try (ActivityStore reopened = new ActivityStore(root, ActivityStore.Limits.defaults())) {
+			reopened.open();
+			assertEquals(2, reopened.recentActivities(alice, 10).size(), "the truncation must be durable");
+			assertNotNull(reopened.byId(anchor));
+			assertEquals(1, reopened.recentActivities(bob, 10).size());
+		}
+	}
+
+	@Test
 	void unknownActivityReturnsNull() throws IOException {
 		try (ActivityStore store = new ActivityStore(tempDir.resolve("empty"), ActivityStore.Limits.defaults())) {
 			store.open();

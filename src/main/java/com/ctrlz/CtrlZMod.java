@@ -31,9 +31,11 @@ public final class CtrlZMod implements ModInitializer {
 	public static final String MOD_ID = "ctrlz";
 	public static final Logger LOGGER = LoggerFactory.getLogger("CtrlZ");
 
+	private static Path configPath;
+
 	@Override
 	public void onInitialize() {
-		Path configPath = FabricLoader.getInstance().getConfigDir().resolve("ctrlz.json");
+		configPath = FabricLoader.getInstance().getConfigDir().resolve("ctrlz.json");
 		CtrlZConfig startupConfig = CtrlZConfig.load(configPath);
 		EngineRouter.resolve(EngineRouter.Engine.parse(startupConfig.engine));
 		LOGGER.info("CtrlZ engine source: {} (engine={})", configPath.toAbsolutePath(),
@@ -49,10 +51,23 @@ public final class CtrlZMod implements ModInitializer {
 		if (EngineRouter.isV2()) {
 			registerV2(startupConfig);
 		} else {
-			registerLegacy();
+			registerLegacy(startupConfig);
 		}
 
 		LOGGER.info("CtrlZ ready (engine={})", EngineRouter.active().id());
+	}
+
+	/**
+	 * The engine is read once, at startup. If the file changed afterwards we only say so: switching
+	 * mid session would leave half the hooks on the old engine, which is exactly what the mutually
+	 * exclusive switch exists to prevent.
+	 */
+	private static void checkEngineUnchanged() {
+		EngineRouter.Engine configured = EngineRouter.Engine.parse(CtrlZConfig.load(configPath).engine);
+		if (configured != EngineRouter.active()) {
+			LOGGER.warn("CtrlZ engine in {} is now '{}' but '{}' is running; restart the game to switch",
+					configPath.toAbsolutePath(), configured.id(), EngineRouter.active().id());
+		}
 	}
 
 	private static void registerV2(CtrlZConfig config) {
@@ -64,6 +79,7 @@ public final class CtrlZMod implements ModInitializer {
 
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			verifyMixinTargets();
+			checkEngineUnchanged();
 			V2UndoService.start(server);
 			V2UndoService.logActiveEngine();
 		});
@@ -73,7 +89,13 @@ public final class CtrlZMod implements ModInitializer {
 				V2UndoService.onPlayerLeft(handler.player.getUUID()));
 	}
 
-	private static void registerLegacy() {
+	private static void registerLegacy(CtrlZConfig config) {
+		if (CtrlZConfig.mineTracerAuditForcedOff()) {
+			LOGGER.warn("CtrlZ: the config file asked for useMineTracerAudit, but the MineTracer cross audit is "
+					+ "deprecated and force-disabled until the legacy engine is deleted. It compares a whole "
+					+ "activity against one 24 block radius and a two second window, so it reports false "
+					+ "conflicts and freezes the undo chain.");
+		}
 		PayloadTypeRegistry.serverboundPlay().register(CtrlZPayload.TYPE, CtrlZPayload.CODEC);
 		PayloadTypeRegistry.clientboundPlay().register(CtrlZPayload.TYPE, CtrlZPayload.CODEC);
 
@@ -82,6 +104,7 @@ public final class CtrlZMod implements ModInitializer {
 
 		ServerLifecycleEvents.SERVER_STARTED.register(server -> {
 			verifyMixinTargets();
+			checkEngineUnchanged();
 			CtrlZServer.start(server);
 			V2UndoService.logActiveEngine();
 		});

@@ -25,13 +25,13 @@ public final class V2ServerNet {
 		ServerPlayer player = context.player();
 		UndoResult result = V2UndoService.undo(player);
 
-		Component message = Component.translatable(V2Messages.messageKey(result.status()));
+		Component message = V2Messages.message(result.status(), result.blocked());
 		if (V2UndoService.debugLogging()) {
 			message = message.copy().append(" [" + EngineRouter.active().id() + "]");
 		}
 		player.sendOverlayMessage(message);
 
 		context.responseSender().sendPacket(new UndoResultPayload(result.status().name(), result.restored(),
-				result.detail(), EngineRouter.active().id()));
+				result.detail(), EngineRouter.active().id(), result.blocked()));
 	}
 }

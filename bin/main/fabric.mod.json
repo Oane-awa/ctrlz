@@ -20,7 +20,8 @@
     ],
     "fabric-gametest": [
       "com.ctrlz.gametest.PipelineGameTest",
-      "com.ctrlz.gametest.Slice0GameTest"
+      "com.ctrlz.gametest.Slice0GameTest",
+      "com.ctrlz.gametest.EffectsGameTest"
     ]
   },
   "mixins": [
@@ -35,8 +36,5 @@
     "minecraft": "~26.1.2",
     "java": ">=25",
     "fabric-api": "*"
-  },
-  "recommends": {
-    "minetracer": "*"
   }
 }

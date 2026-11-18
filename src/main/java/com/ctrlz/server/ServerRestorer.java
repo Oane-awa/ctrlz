@@ -62,6 +62,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				case INVENTORY_SLOTS -> checkInventory(consequence);
 				case ITEM_ENTITY_SPAWN -> checkItemEntity(consequence);
 				case PLAYER_STATE -> checkPlayer(consequence);
+				case ENTITY_EFFECTS -> checkEffects(consequence);
 				default -> ConflictType.NONE;
 			};
 		} catch (RuntimeException e) {
@@ -155,6 +156,19 @@ public final class ServerRestorer implements ConsequenceRestorer {
 		return free ? ConflictType.NONE : ConflictType.STATE_MISMATCH;
 	}
 
+	/**
+	 * The effect set is restored on the live entity, so a target that is gone (dead, despawned,
+	 * unloaded, logged off) cannot be restored. Refusing is deliberate: reporting success while the
+	 * effects stayed as they are would be a partial restore described as a full one.
+	 */
+	private ConflictType checkEffects(ConsequenceRecord consequence) {
+		LivingEntity target = livingFromSubject(consequence.subject());
+		if (target == null) {
+			return ConflictType.TARGET_MISSING;
+		}
+		return EffectSnapshots.isCaptured(consequence.before()) ? ConflictType.NONE : ConflictType.NO_SNAPSHOT;
+	}
+
 	// ------------------------------------------------------------------ restore / reapply
 
 	@Override
@@ -168,6 +182,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				case ITEM_ENTITY_SPAWN -> consequence.after().length > 0 ? discardItem(consequence)
 						: spawnItem(consequence, consequence.before(), false);
 				case ENTITY_HEALTH -> applyHealth(consequence, consequence.before());
+				case ENTITY_EFFECTS -> applyEffects(consequence, consequence.before());
 				case PLAYER_STATE -> applyPlayer(consequence, consequence.before());
 				default -> true;
 			};
@@ -186,6 +201,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				case ITEM_ENTITY_SPAWN -> consequence.after().length > 0 ? spawnItem(consequence, consequence.after(), true)
 						: discardItem(consequence);
 				case ENTITY_HEALTH -> applyHealth(consequence, consequence.after());
+				case ENTITY_EFFECTS -> applyEffects(consequence, consequence.after());
 				case PLAYER_STATE -> applyPlayer(consequence, consequence.after());
 				default -> true;
 			};
@@ -315,6 +331,30 @@ public final class ServerRestorer implements ConsequenceRestorer {
 			return false;
 		}
 		return true;
+	}
+
+	/**
+	 * Replaces the target's whole effect set with the recorded one; see {@link EffectSnapshots}.
+	 *
+	 * <p>A payload that is absent or unreadable returns false, which makes the engine re-apply what it
+	 * already did instead of pretending the effects were restored.
+	 */
+	private boolean applyEffects(ConsequenceRecord consequence, byte[] payload) {
+		LivingEntity target = livingFromSubject(consequence.subject());
+		if (target == null) {
+			return false;
+		}
+		return EffectSnapshots.apply(target, payload);
+	}
+
+	/** Subjects look like {@code player#<uuid>} or {@code entity#<uuid>}. */
+	private LivingEntity livingFromSubject(String subject) {
+		String[] parts = subject.split("#");
+		if (parts.length < 2) {
+			return null;
+		}
+		Entity entity = "player".equals(parts[0]) ? playerFromSubject(subject) : findEntity(parts[1]);
+		return entity instanceof LivingEntity living ? living : null;
 	}
 
 	private boolean applyPlayer(ConsequenceRecord consequence, byte[] positionBytes) {

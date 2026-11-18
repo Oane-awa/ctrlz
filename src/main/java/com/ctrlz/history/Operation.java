@@ -27,6 +27,7 @@ public final class Operation {
 	private long appliedSeq;
 	private boolean blocked;
 	private String blockedReason = "";
+	private UndoResult.Status blockedStatus;
 
 	Operation(UUID operationId, UUID playerUuid, String worldKey, long seq, long createdPlayTick,
 			long committedPlayTick, OperationType type, String gameMode, Coverage coverage, List<Snapshot> snapshots,
@@ -122,15 +123,34 @@ public final class Operation {
 		return blockedReason;
 	}
 
+	/**
+	 * Status the record was frozen with, so a later key press can replay the same answer instead of
+	 * running the dry run again (a re-run could even report a different reason).
+	 */
+	public UndoResult.Status blockedStatus() {
+		return blockedStatus == null ? UndoResult.Status.CONFLICT : blockedStatus;
+	}
+
 	/** Marks the undo finished. The applied counter is the idempotency half key. */
 	public void markUndone() {
 		undone = true;
 		appliedSeq++;
 	}
 
-	public void block(String reason) {
+	/** Freezes the record forever; the undo chain stops here (no skipping to older records). */
+	public void block(UndoResult.Status status, String reason) {
 		blocked = true;
+		blockedStatus = status == null ? UndoResult.Status.CONFLICT : status;
 		blockedReason = reason == null ? "" : reason;
+	}
+
+	public void block(String reason) {
+		block(UndoResult.Status.CONFLICT, reason);
+	}
+
+	/** Cached answer for a blocked record; identical on every key press. */
+	public UndoResult blockedResult() {
+		return new UndoResult(blockedStatus(), 0, blockedReason, blocked);
 	}
 
 	public boolean isUndoable(long playTick) {

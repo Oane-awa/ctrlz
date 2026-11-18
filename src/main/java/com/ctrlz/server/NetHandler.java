@@ -36,31 +36,22 @@ public final class NetHandler {
 					Messages.DetailDto detail = request == null ? null : HistoryService.detail(request.activityId());
 					if (detail != null) {
 						send(context, Messages.S2C_DETAIL, detail);
+					} else if (request != null) {
+						// The row was truncated by a restore: say so instead of leaving a stale detail
+						// on screen that no longer exists in the history.
+						send(context, Messages.S2C_NOTICE,
+								new Messages.NoticeDto("ctrlz.gui.detail_missing", Long.toString(request.activityId())));
 					}
 				}
 				case Messages.C2S_REQUEST_ROLLBACK -> {
 					Messages.RollbackRequestDto request = Messages.GSON.fromJson(payload.data(),
 							Messages.RollbackRequestDto.class);
-					RollbackService.Result result = request == null ? new RollbackService.Result(false, 0, "bad_request",
-							"ctrlz.result.bad_request") : RollbackService.rollback(player, request.activityId());
-					send(context, Messages.S2C_ROLLBACK_RESULT,
-							new Messages.RollbackResultDto(result.success(), result.restored(), result.conflict(),
-									result.messageKey()));
-					if (!result.success()) {
-						player.sendOverlayMessage(Component.translatable(result.messageKey()));
-					}
+					reply(context, request == null
+							? new RollbackService.Result(false, 0L, 0, 0, 0, false, "bad_request",
+									"ctrlz.result.bad_request", "")
+							: RollbackService.restoreToActivity(player, request.activityId()));
 				}
-				case Messages.C2S_ROLLBACK_LAST -> {
-					RollbackService.Result result = RollbackService.rollbackLast(player);
-					send(context, Messages.S2C_ROLLBACK_RESULT,
-							new Messages.RollbackResultDto(result.success(), result.restored(), result.conflict(),
-									result.messageKey()));
-					// The hotkey is pressed without any screen open, so the outcome has to be visible
-					// on the action bar; otherwise a refused rollback looks like nothing happened.
-					if (!result.success()) {
-						player.sendOverlayMessage(Component.translatable(result.messageKey()));
-					}
-				}
+				case Messages.C2S_ROLLBACK_LAST -> reply(context, RollbackService.restoreLast(player));
 				case Messages.C2S_REQUEST_CONFIG -> send(context, Messages.S2C_CONFIG,
 						new Messages.ConfigDto(configJson()));
 				case Messages.C2S_UPDATE_CONFIG -> {
@@ -85,6 +76,26 @@ public final class NetHandler {
 			}
 		} catch (RuntimeException e) {
 			send(context, Messages.S2C_NOTICE, new Messages.NoticeDto("ctrlz.notice.error", e.getMessage()));
+		}
+	}
+
+	/**
+	 * Sends the same result object for both entry points and shows it on the action bar.
+	 *
+	 * <p>The hotkey is pressed without any screen open, so the outcome has to be visible there; a GUI
+	 * user sees the same text and additionally gets a refreshed list because the client re-requests
+	 * history whenever a restore succeeded.
+	 */
+	private static void reply(ServerPlayNetworking.Context context, RollbackService.Result result) {
+		send(context, Messages.S2C_ROLLBACK_RESULT, new Messages.RollbackResultDto(result.success(),
+				result.targetActivityId(), result.activities(), result.restored(), result.skipped(),
+				result.truncated(), result.conflict(), result.messageKey(), result.detail()));
+		ServerPlayer player = context.player();
+		if (result.success()) {
+			player.sendOverlayMessage(Component.translatable("ctrlz.notice.restored_to", result.activities(),
+					result.restored()));
+		} else {
+			player.sendOverlayMessage(Component.translatable(result.messageKey()));
 		}
 	}
 

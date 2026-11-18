@@ -60,6 +60,8 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 	public void onDataChanged() {
 		Messages.RollbackResultDto result = ClientNet.lastResult();
 		if (result != null) {
+			// The activity this screen shows may have been truncated by the restore, so ask again;
+			// the server answers with a notice when the row no longer exists.
 			ClientNet.requestDetail(activityId);
 		}
 		rebuildWidgets();
@@ -70,8 +72,9 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 		super.extractRenderState(graphics, mouseX, mouseY, partialTick);
 		Messages.DetailDto detail = ClientNet.detail();
 		graphics.centeredText(this.font, this.title, this.width / 2, 14, 0xFFFFFFFF);
-		if (detail == null || detail.activity().id() != activityId) {
-			graphics.text(this.font, Component.translatable("ctrlz.gui.loading").getString(), 16, 40, 0xFFB0B0B0);
+		if (ClientNet.detailMissing() || detail == null || detail.activity().id() != activityId) {
+			String key = ClientNet.detailMissing() ? "ctrlz.gui.detail_missing" : "ctrlz.gui.loading";
+			graphics.text(this.font, Component.translatable(key).getString(), 16, 40, 0xFFB0B0B0);
 			return;
 		}
 		Messages.ActivityDto activity = detail.activity();

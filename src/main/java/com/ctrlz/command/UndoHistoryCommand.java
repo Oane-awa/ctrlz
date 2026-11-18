@@ -28,7 +28,10 @@ public final class UndoHistoryCommand {
 		CommandRegistrationCallback.EVENT.register((dispatcher, registry, environment) -> dispatcher.register(
 				Commands.literal("undohistory")
 						.executes(context -> list(context.getSource()))
-						.then(Commands.literal("purge").executes(context -> purge(context.getSource())))
+						.then(Commands.literal("purge")
+								.executes(context -> purgeHint(context.getSource()))
+								.then(Commands.literal("confirm")
+										.executes(context -> purge(context.getSource()))))
 						.then(Commands.literal("dump")
 								.then(Commands.argument("operationId", StringArgumentType.string())
 										.executes(context -> dump(context.getSource(),
@@ -45,6 +48,12 @@ public final class UndoHistoryCommand {
 				.append(" bytes=").append(V2UndoService.stack().estimatedBytes())
 				.append(" oldestPlayTick=").append(V2UndoService.stack().oldestPlayTick())
 				.append(" playTick=").append(V2UndoService.playTick());
+		Operation target = V2UndoService.stack().undoTarget(V2UndoService.playTick());
+		if (target != null && target.blocked()) {
+			header.append(" | undo chain BLOCKED at #").append(target.seq()).append(" (")
+					.append(target.blockedStatus()).append(": ").append(target.blockedReason())
+					.append(") — Z replays that failure; /undohistory purge confirm clears the stack");
+		}
 		source.sendSuccess(() -> Component.literal(header.toString()), false);
 
 		List<Operation> operations = V2UndoService.stack().newestFirst();
@@ -53,7 +62,7 @@ public final class UndoHistoryCommand {
 			String line = String.format("#%d %s %s %s blocks=%d entities=%d bytes=%d undone=%s blocked=%s",
 					operation.seq(), operation.operationId().toString().substring(0, 8), operation.type(),
 					operation.coverage(), operation.blockSnapshotCount(), operation.entitySnapshotCount(),
-					operation.estimatedBytes(), operation.undone(), operation.blocked());
+					operation.estimatedBytes(), operation.undone(), blockedLabel(operation));
 			source.sendSuccess(() -> Component.literal(line), false);
 		}
 		if (operations.size() > 10) {
@@ -94,6 +103,17 @@ public final class UndoHistoryCommand {
 			}
 		}
 		return null;
+	}
+
+	private static String blockedLabel(Operation operation) {
+		return operation.blocked() ? operation.blockedStatus() + "(" + operation.blockedReason() + ")" : "false";
+	}
+
+	/** C.4: clearing the history is the only way out of a blocked chain, so it needs a confirmation. */
+	private static int purgeHint(CommandSourceStack source) {
+		source.sendFailure(Component.literal("[ctrlz] purge clears the whole undo history and cannot be undone; "
+				+ "run /undohistory purge confirm to proceed"));
+		return 0;
 	}
 
 	private static int purge(CommandSourceStack source) {

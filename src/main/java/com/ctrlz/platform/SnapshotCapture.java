@@ -40,6 +40,22 @@ public final class SnapshotCapture {
 	}
 
 	/**
+	 * Player state captured before an operation.
+	 *
+	 * <p>{@code effects} carries the complete status effect set encoded with the native
+	 * {@code MobEffectInstance} stream codec (see {@link com.ctrlz.server.EffectSnapshots}), so the
+	 * field is real restore data and not a placeholder. Position/health/experience are recorded as
+	 * well; the undo of those lands in a later slice, effects are already applied.
+	 */
+	public static Snapshot.PlayerState playerState(ServerLevel level, net.minecraft.world.entity.player.Player player) {
+		net.minecraft.world.phys.Vec3 velocity = player.getDeltaMovement();
+		return new Snapshot.PlayerState(SnapshotCodec.dimensionId(level), player.getX(), player.getY(), player.getZ(),
+				player.getYRot(), player.getXRot(), velocity.x, velocity.y, velocity.z, player.getHealth(),
+				player.getFoodData().getFoodLevel(), player.totalExperience,
+				com.ctrlz.server.EffectSnapshots.encode(player), player.getRemainingFireTicks());
+	}
+
+	/**
 	 * Records an entity that did not exist before the operation, so undoing the operation can remove
 	 * exactly that entity and nothing else.
 	 */

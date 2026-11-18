@@ -90,10 +90,9 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 	public void onDataChanged() {
 		Messages.RollbackResultDto result = ClientNet.lastResult();
 		if (result != null) {
-			this.lastResultKey = result.success() ? "" : result.message();
-			// A rollback changes the status of rows already on screen, so fetch the list again.
-			// The follow up history answer carries no result, which ends the refresh chain.
-			refresh();
+			// ClientNet already re-fetched the list after a successful restore; this only surfaces the
+			// outcome. Patching the rows here would show a history the server no longer has.
+			lastResultKey = result.success() ? "" : result.message();
 		}
 		rebuildWidgets();
 	}

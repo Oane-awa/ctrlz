@@ -46,7 +46,7 @@
   "ctrlz.config.captureContainerContents": "捕获容器内容",
   "ctrlz.config.rollbackRestoreDurability": "回退时恢复耐久",
   "ctrlz.config.announceRollback": "在聊天栏提示回退",
-  "ctrlz.config.useMineTracerAudit": "启用 MineTracer 交叉校验",
+  "ctrlz.config.useMineTracerAudit": "启用 MineTracer 交叉校验（已废弃，默认关闭）",
   "ctrlz.config.useMineTracerFallback": "允许 MineTracer 兜底",
   "ctrlz.config.debugLogging": "调试日志",
   "ctrlz.config.movementMergeGapTicks": "移动合并间隔（刻）",
@@ -75,9 +75,12 @@
   "ctrlz.result.no_snapshot": "记录的状态不完整，未做任何恢复。",
   "ctrlz.result.incomplete_structure": "只记录到多方块结构的一部分，已拒绝回退且未做任何修改。",
   "ctrlz.result.busy": "已有一次回退正在执行。",
+  "ctrlz.result.truncate_failed": "世界已恢复，但历史记录未能截断（磁盘错误），请重试。",
   "ctrlz.reason.unsupported": "包含无法安全恢复的变更。",
 
   "ctrlz.notice.rolled_back": "已回退 %s 项连锁反应。",
+  "ctrlz.notice.restored_to": "已恢复到该节点：撤销 %1$s 个操作，写回 %2$s 项变化。",
+  "ctrlz.gui.detail_missing": "该记录已被恢复操作截断，不再存在",
   "ctrlz.notice.config_saved": "CtrlZ 配置已保存。",
   "ctrlz.notice.error": "CtrlZ 错误：%s",
 
@@ -93,5 +96,6 @@
   "ctrlz.v2.block_unloaded": "目标区域未加载",
   "ctrlz.v2.not_restorable": "此操作无法恢复",
   "ctrlz.v2.disabled": "CtrlZ 已禁用",
+  "ctrlz.v2.chain_blocked": "撤销链已在此处中断：%s（可用 /undohistory purge confirm 清空历史）",
   "ctrlz.v2.error": "撤销失败，世界未做任何修改"
 }

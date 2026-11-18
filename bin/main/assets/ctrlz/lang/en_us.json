@@ -46,7 +46,7 @@
   "ctrlz.config.captureContainerContents": "Capture container contents",
   "ctrlz.config.rollbackRestoreDurability": "Restore tool durability",
   "ctrlz.config.announceRollback": "Announce rollbacks in chat",
-  "ctrlz.config.useMineTracerAudit": "Use MineTracer cross audit",
+  "ctrlz.config.useMineTracerAudit": "Use MineTracer cross audit (deprecated, off by default)",
   "ctrlz.config.useMineTracerFallback": "Allow MineTracer fallback",
   "ctrlz.config.debugLogging": "Debug logging",
   "ctrlz.config.movementMergeGapTicks": "Movement merge gap (ticks)",
@@ -75,13 +75,16 @@
   "ctrlz.result.no_snapshot": "The recorded state is incomplete, so nothing was restored.",
   "ctrlz.result.incomplete_structure": "Only part of a multi block structure could be restored, so nothing was changed.",
   "ctrlz.result.busy": "A rollback is already running.",
+  "ctrlz.result.truncate_failed": "The world was restored, but the history could not be truncated (disk error); please retry.",
   "ctrlz.reason.unsupported": "Contains changes that cannot be restored safely.",
 
   "ctrlz.notice.rolled_back": "Rolled back %s consequence(s).",
+  "ctrlz.notice.restored_to": "Restored to that node: %1$s operation(s) undone, %2$s change(s) written back.",
   "ctrlz.notice.config_saved": "CtrlZ configuration saved.",
   "ctrlz.notice.error": "CtrlZ error: %s",
 
   "ctrlz.reason.crash": "Server stopped before the activity finished.",
+  "ctrlz.gui.detail_missing": "That record was truncated by a restore and no longer exists",
   "ctrlz.reason.conflict": "State conflict detected during rollback.",
   "ctrlz.reason.audit_conflict": "External audit backend reported unrecorded changes.",
 
@@ -93,5 +96,6 @@
   "ctrlz.v2.block_unloaded": "Target area is not loaded",
   "ctrlz.v2.not_restorable": "This operation cannot be restored",
   "ctrlz.v2.disabled": "CtrlZ is disabled",
+  "ctrlz.v2.chain_blocked": "Undo chain is blocked here: %s (use /undohistory purge confirm to reset)",
   "ctrlz.v2.error": "Undo failed, nothing was changed"
 }

@@ -92,7 +92,9 @@ public final class HistoryService {
 			}
 			result.add(record);
 		}
-		result.sort(Comparator.comparingLong(ActivityRecord::startMillis).reversed());
+		// Ordered by the activity id, which the store allocates monotonically: it is the same order the
+		// truncation uses, and unlike a timestamp it stays unambiguous for operations in the same tick.
+		result.sort(Comparator.comparingLong(ActivityRecord::id).reversed());
 		return result;
 	}
 

@@ -233,6 +233,40 @@ public final class ActivityStore implements AutoCloseable {
 		return activities.get(id);
 	}
 
+	/**
+	 * Deletes every activity of one player that is newer than {@code anchorId}.
+	 *
+	 * <p>History order is the activity id, which the store allocates monotonically, so a truncation is
+	 * "all of this player's records after the anchor". Ids never repeat and two actions in the same
+	 * tick still get different ids, which is what makes this boundary unambiguous. Other players'
+	 * records are untouched: their branch is independent and must survive somebody else's restore.
+	 *
+	 * @return how many records were removed
+	 */
+	public int deleteActivitiesAfter(UUID playerId, long anchorId) throws IOException {
+		java.util.List<Long> victims = new ArrayList<>();
+		for (ActivityRecord record : activities.values()) {
+			if (record.playerId().equals(playerId) && record.id() > anchorId) {
+				victims.add(record.id());
+			}
+		}
+		for (Long id : victims) {
+			deleteActivity(id);
+		}
+		return victims.size();
+	}
+
+	/** How many of this player's records exist after {@code anchorId}. */
+	public int countActivitiesAfter(UUID playerId, long anchorId) {
+		int count = 0;
+		for (ActivityRecord record : activities.values()) {
+			if (record.playerId().equals(playerId) && record.id() > anchorId) {
+				count++;
+			}
+		}
+		return count;
+	}
+
 	public List<ActivityRecord> recentActivities(UUID playerId, int limit) {
 		List<ActivityRecord> result = new ArrayList<>();
 		List<ActivityRecord> all = new ArrayList<>(activities.values());

@@ -63,10 +63,30 @@ public final class CtrlZConfig {
 	public boolean rollbackRestoreExperience = true;
 	public boolean announceRollback = true;
 
-	public boolean useMineTracerAudit = true;
+	/**
+	 * Deprecated MineTracer cross check.
+	 *
+	 * <p>Off by default and scheduled for removal together with the legacy engine (supplement D). The
+	 * judging rule — every block of an activity against the rows MineTracer has inside one 24 block
+	 * radius and a two second window — produced far more false alarms than real findings, so the
+	 * decision is to drop the integration rather than adapt it. The code path is deliberately left
+	 * untouched until it is deleted.
+	 *
+	 * <p>{@link #validate()} forces this back to {@code false} even when an existing config file still
+	 * says {@code true}: changing only the default would leave every already installed world with the
+	 * false conflicts it is being removed for.
+	 */
+	public boolean useMineTracerAudit = false;
 	public boolean useMineTracerFallback = false;
 
 	public boolean debugLogging = false;
+
+	/** Set when a config file still asked for the removed MineTracer audit; not serialised. */
+	private static volatile boolean mineTracerAuditForcedOff;
+
+	public static boolean mineTracerAuditForcedOff() {
+		return mineTracerAuditForcedOff;
+	}
 
 	public CtrlZConfig copy() {
 		return fromJson(toJson());
@@ -86,6 +106,12 @@ public final class CtrlZConfig {
 	}
 
 	public void validate() {
+		if (useMineTracerAudit) {
+			// Supplement D: force the deprecated cross audit off, but remember that the file asked for
+			// it so startup can say why it is not running.
+			useMineTracerAudit = false;
+			mineTracerAuditForcedOff = true;
+		}
 		if (!"legacy".equalsIgnoreCase(engine) && !"v2".equalsIgnoreCase(engine)) {
 			engine = "legacy";
 		} else {

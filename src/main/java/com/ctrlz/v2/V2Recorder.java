@@ -32,6 +32,8 @@ import java.util.UUID;
 public final class V2Recorder {
 	/** One open transaction per player; the server thread owns this map. */
 	private static final Map<UUID, Transaction> OPEN = new LinkedHashMap<>();
+	/** Effect set of the acting player when the transaction opened, compared at seal time. */
+	private static final Map<UUID, Snapshot.PlayerState> PLAYER_BEFORE = new LinkedHashMap<>();
 
 	private V2Recorder() {
 	}
@@ -55,6 +57,7 @@ public final class V2Recorder {
 				OperationType.BREAK_BLOCK, gameMode(player), V2UndoService.playTick());
 		Snapshot.Block snapshot = SnapshotCapture.block(level, pos);
 		transaction.capturePrimary(SnapshotKeys.of(snapshot), snapshot);
+		PLAYER_BEFORE.put(player.getUUID(), SnapshotCapture.playerState(level, player));
 		if (state.hasBlockEntity()) {
 			// Slice 0 only restores the block itself; block entity contents arrive with slice 1.
 			transaction.degrade(Coverage.PARTIAL);
@@ -66,10 +69,18 @@ public final class V2Recorder {
 	public static void endBreak(Player player, ServerLevel level, BlockPos pos) {
 		Transaction transaction = OPEN.remove(player.getUUID());
 		if (transaction == null) {
+			PLAYER_BEFORE.remove(player.getUUID());
 			return;
 		}
 		if (TransactionContext.current() == transaction) {
 			TransactionContext.close();
+		}
+		Snapshot.PlayerState before = PLAYER_BEFORE.remove(player.getUUID());
+		if (before != null && com.ctrlz.server.EffectSnapshots.isCaptured(before.effects())
+				&& !java.util.Arrays.equals(before.effects(), SnapshotCapture.playerState(level, player).effects())) {
+			// Only an operation that actually changed the effect set carries a player snapshot, so an
+			// ordinary block break never writes effect data it would then have to restore.
+			transaction.captureChained(before);
 		}
 		for (Map.Entry<String, Snapshot> entry : transaction.primary().entrySet()) {
 			if (!transaction.after().containsKey(entry.getKey())

@@ -5,6 +5,7 @@ import com.ctrlz.history.Operation;
 import com.ctrlz.history.OperationType;
 import com.ctrlz.history.Snapshot;
 import com.ctrlz.history.StateFingerprint;
+import com.ctrlz.history.UndoResult;
 import com.ctrlz.platform.SnapshotCodec;
 import com.google.gson.Gson;
 import com.google.gson.GsonBuilder;
@@ -176,6 +177,7 @@ public final class HistoryState extends SavedData {
 		object.addProperty("p2", operation.p2Touched());
 		if (operation.blocked()) {
 			object.addProperty("blocked", operation.blockedReason());
+			object.addProperty("blockedStatus", operation.blockedStatus().name());
 		}
 		JsonArray snapshots = new JsonArray();
 		for (Snapshot snapshot : operation.snapshots()) {
@@ -223,7 +225,15 @@ public final class HistoryState extends SavedData {
 					object.has("appliedSeq") ? object.get("appliedSeq").getAsLong() : 0L,
 					object.has("p2") && object.get("p2").getAsBoolean());
 			if (object.has("blocked")) {
-				operation.block(object.get("blocked").getAsString());
+				UndoResult.Status status = UndoResult.Status.CONFLICT;
+				if (object.has("blockedStatus")) {
+					try {
+						status = UndoResult.Status.valueOf(object.get("blockedStatus").getAsString());
+					} catch (IllegalArgumentException ignored) {
+						// Unknown name (older document): the record stays blocked, only the label degrades.
+					}
+				}
+				operation.block(status, object.get("blocked").getAsString());
 			}
 			return operation;
 		} catch (RuntimeException e) {

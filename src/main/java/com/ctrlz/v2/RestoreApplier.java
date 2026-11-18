@@ -27,6 +27,10 @@ public final class RestoreApplier {
 	private RestoreApplier() {
 	}
 
+	/** The live effect set of a player before the undo touched it, used by {@link #revert}. */
+	public record PreviousEffects(net.minecraft.world.entity.LivingEntity entity, byte[] effects) {
+	}
+
 	public static int apply(List<UndoResult.Plan.Step> steps, MinecraftServer server) {
 		int applied = 0;
 		try {
@@ -52,6 +56,9 @@ public final class RestoreApplier {
 					if (level != null) {
 						level.setBlock(SnapshotCodec.unpack(block.packedPos()), previous, Block.UPDATE_ALL);
 					}
+				} else if (step.snapshot() instanceof Snapshot.PlayerState
+						&& step.previousValue() instanceof PreviousEffects previous) {
+					com.ctrlz.server.EffectSnapshots.apply(previous.entity(), previous.effects());
 				}
 				// Entity removals are planned last and never reached by a failing block restore, so
 				// there is nothing to write back for them within slice 0.
@@ -77,6 +84,13 @@ public final class RestoreApplier {
 		} else if (step.snapshot() instanceof Snapshot.Entity entity && !entity.existedBefore()) {
 			if (step.previousValue() instanceof Entity live && !live.isRemoved()) {
 				live.discard();
+			}
+		} else if (step.snapshot() instanceof Snapshot.PlayerState state
+				&& step.previousValue() instanceof PreviousEffects previous) {
+			// Whole set replacement: extras disappear, mismatched ones are recreated with the recorded
+			// duration, and the attribute modifiers are recomputed once by the remove/add pair.
+			if (!com.ctrlz.server.EffectSnapshots.apply(previous.entity(), state.effects())) {
+				throw new IllegalStateException("unusable effect payload");
 			}
 		}
 	}

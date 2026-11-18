@@ -11,9 +11,12 @@ import com.ctrlz.platform.PlayTickClock;
 import com.ctrlz.platform.TransactionContext;
 import net.minecraft.server.MinecraftServer;
 import net.minecraft.world.entity.player.Player;
+import net.minecraft.world.level.storage.LevelResource;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import java.nio.file.Files;
+import java.nio.file.Path;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.UUID;
@@ -24,6 +27,11 @@ import java.util.UUID;
  * <p>Everything here runs on the server thread. The undo is two phase: a dry run that can only say
  * "no", then an apply that reverts itself if it throws, followed by a conservation audit that still
  * refuses the result if the item totals differ from what the plan promised.
+ *
+ * <p>Any refusal freezes the record ({@link Operation#block}). The stack is strictly LIFO, so a
+ * frozen record stops the chain: later key presses replay the cached answer and never undo an older
+ * record behind its back. Because recovery from {@code blocked} is not offered in v1, the only way
+ * out is {@code /undohistory purge confirm}.
  */
 public final class V2UndoService {
 	public static final long RATE_LIMIT_MILLIS = 200L;
@@ -45,6 +53,26 @@ public final class V2UndoService {
 		server = minecraftServer;
 		undoing = false;
 		LAST_REQUEST.clear();
+		logLegacyNamespace(minecraftServer);
+	}
+
+	/**
+	 * A.3.3: the two engines never read each other's data. The legacy engine keeps a journal under
+	 * {@code <world>/ctrlz/}; the v2 engine keeps {@code ctrlz:history} inside {@code SavedData}.
+	 * Saying so at world load makes the isolation observable instead of a claim.
+	 */
+	private static void logLegacyNamespace(MinecraftServer minecraftServer) {
+		try {
+			Path legacy = minecraftServer.getWorldPath(LevelResource.ROOT).resolve("ctrlz");
+			if (Files.isDirectory(legacy)) {
+				LOGGER.info("CtrlZ v2 uses SavedData key 'ctrlz:history'; the legacy journal at {} is "
+						+ "ignored and never read", legacy);
+			} else {
+				LOGGER.info("CtrlZ v2 uses SavedData key 'ctrlz:history'; no legacy journal present");
+			}
+		} catch (RuntimeException e) {
+			LOGGER.debug("CtrlZ could not inspect the legacy journal directory", e);
+		}
 	}
 
 	/** Remembers the user's debug preference so feedback can carry the engine tag. */
@@ -130,9 +158,16 @@ public final class V2UndoService {
 			return UndoResult.of(UndoResult.Status.BUSY, "already undoing");
 		}
 
-		Operation operation = STACK.latestUndoable(CLOCK.now());
+		Operation operation = STACK.undoTarget(CLOCK.now());
 		if (operation == null) {
 			return UndoResult.of(UndoResult.Status.NO_HISTORY);
+		}
+		if (operation.blocked()) {
+			// C.2.2: replay the cached answer. Re-running the dry run would not change the outcome
+			// and could even report a different reason for the same frozen record.
+			LOGGER.info("CtrlZ undo replay op={} blocked={} reason={}", operation.operationId(),
+					operation.blockedStatus(), operation.blockedReason());
+			return operation.blockedResult();
 		}
 
 		ConservationAuditImpl audit = new ConservationAuditImpl(minecraftServer);
@@ -146,8 +181,9 @@ public final class V2UndoService {
 				restored = RestoreApplier.apply(plan.steps(), minecraftServer);
 			} catch (RuntimeException e) {
 				LOGGER.error("CtrlZ undo failed while applying op={}", operation.operationId(), e);
-				operation.block("apply failed");
-				return new UndoResult(UndoResult.Status.APPLY_REVERTED, 0, String.valueOf(e.getMessage()));
+				String detail = String.valueOf(e.getMessage());
+				operation.block(UndoResult.Status.APPLY_REVERTED, detail);
+				return UndoResult.blocked(UndoResult.Status.APPLY_REVERTED, detail);
 			}
 
 			Map<String, Integer> expected = audit.expectedAfter(plan.auditBefore(), plan.steps());
@@ -157,8 +193,8 @@ public final class V2UndoService {
 				LOGGER.error("CtrlZ conservation audit failed op={} difference=[{}]", operation.operationId(),
 						difference);
 				RestoreApplier.revert(plan.steps(), restored, minecraftServer);
-				operation.block("audit " + difference);
-				return UndoResult.of(UndoResult.Status.AUDIT_FAILED, difference);
+				operation.block(UndoResult.Status.AUDIT_FAILED, difference);
+				return UndoResult.blocked(UndoResult.Status.AUDIT_FAILED, difference);
 			}
 
 			operation.markUndone();
@@ -167,13 +203,16 @@ public final class V2UndoService {
 					operation.appliedSeq());
 			return new UndoResult(UndoResult.Status.OK, restored, "");
 		} catch (UndoResult.PlanException e) {
-			LOGGER.warn("CtrlZ undo refused op={} status={} reason={}", operation.operationId(), e.status(),
-					e.getMessage());
-			return UndoResult.of(e.status(), e.getMessage());
+			// C.2.1: a dry run refusal freezes the record; the chain stops at this point.
+			LOGGER.warn("CtrlZ undo refused op={} status={} reason={} (record blocked, chain stops)",
+					operation.operationId(), e.status(), e.getMessage());
+			operation.block(e.status(), e.getMessage());
+			return UndoResult.blocked(e.status(), e.getMessage());
 		} catch (RuntimeException e) {
 			LOGGER.error("CtrlZ undo crashed op={}", operation.operationId(), e);
-			operation.block("crash");
-			return new UndoResult(UndoResult.Status.APPLY_FROZEN, 0, String.valueOf(e.getMessage()));
+			String detail = String.valueOf(e.getMessage());
+			operation.block(UndoResult.Status.APPLY_FROZEN, detail);
+			return UndoResult.blocked(UndoResult.Status.APPLY_FROZEN, detail);
 		} finally {
 			TransactionContext.endRestore();
 			undoing = false;

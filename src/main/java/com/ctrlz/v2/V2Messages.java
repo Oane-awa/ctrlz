@@ -21,4 +21,20 @@ public final class V2Messages {
 			default -> "ctrlz.v2.error";
 		};
 	}
+
+	/**
+	 * Action bar text for one result.
+	 *
+	 * <p>A blocked result says two things on purpose: why this attempt failed, and that the undo chain
+	 * stopped here (C.2.4). Without the second half the player sees an ordinary failure and keeps
+	 * pressing Z, which is exactly the "same record re-judged forever" behaviour the old engine had.
+	 */
+	public static net.minecraft.network.chat.Component message(UndoResult.Status status, boolean blocked) {
+		net.minecraft.network.chat.Component reason =
+				net.minecraft.network.chat.Component.translatable(messageKey(status));
+		if (!blocked) {
+			return reason;
+		}
+		return net.minecraft.network.chat.Component.translatable("ctrlz.v2.chain_blocked", reason);
+	}
 }

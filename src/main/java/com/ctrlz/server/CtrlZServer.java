@@ -45,6 +45,8 @@ public final class CtrlZServer {
 	private final Map<Long, CausalWindow> windows = new HashMap<>();
 	private final Map<UUID, List<net.minecraft.world.item.ItemStack>> lastInventories = new ConcurrentHashMap<>();
 	private final Map<UUID, Vec3> lastPositions = new ConcurrentHashMap<>();
+	/** Last captured effect set per player, used to turn effect changes into consequences. */
+	private final Map<UUID, byte[]> lastEffects = new ConcurrentHashMap<>();
 
 	private long lastAutosaveMillis;
 	private int suppressionDepth;
@@ -188,6 +190,36 @@ public final class CtrlZServer {
 	private record ServerLevelContext(net.minecraft.server.level.ServerLevel level, String dimension) {
 	}
 
+	/**
+	 * Status effect diff for the acting player.
+	 *
+	 * <p>Effects change through drinking, milk, expiration, commands and mods, so diffing once per
+	 * tick catches every source instead of only the potion item handler. The recorded pair is the full
+	 * effect set before and after, which is what lets a restore clear an effect that was gained later
+	 * and put back the remaining duration of one that only ticked down.
+	 */
+	private void tickEffects(ServerPlayer player) {
+		if (!config.capturePlayerState) {
+			return;
+		}
+		byte[] current = EffectSnapshots.encode(player);
+		byte[] previous = lastEffects.put(player.getUUID(), current);
+		if (previous == null || java.util.Arrays.equals(previous, current) || suppressed()) {
+			return;
+		}
+		ActivityRecord activity = currentActivity(player);
+		if (activity == null) {
+			return;
+		}
+		net.minecraft.core.RegistryAccess registries = player.level().registryAccess();
+		consequence(activity, ConsequenceKind.ENTITY_EFFECTS, ConsequenceOrigin.DIRECT,
+				player.level().dimension().identifier().toString(), ConsequenceRecord.NO_POSITION,
+				"player#" + player.getUUID(), previous, current,
+				"effects " + EffectSnapshots.describe(previous, registries) + " -> "
+						+ EffectSnapshots.describe(current, registries),
+				0L);
+	}
+
 	/** Called once per server tick for every online player. */
 	public void tick() {
 		if (!config.enabled || store == null) {
@@ -221,6 +253,7 @@ public final class CtrlZServer {
 			}
 			session.tick(tick, horizontalSpeedSqr);
 			tickInventory(player);
+			tickEffects(player);
 		}
 		long now = System.currentTimeMillis();
 		if (now - lastAutosaveMillis >= config.autosaveSeconds * 1000L) {
@@ -250,6 +283,9 @@ public final class CtrlZServer {
 		if (session != null) {
 			session.flush(currentTick());
 		}
+		lastEffects.remove(playerId);
+		lastPositions.remove(playerId);
+		lastInventories.remove(playerId);
 	}
 
 	private final class StoreSink implements ActivitySession.Sink {
@@ -372,11 +408,12 @@ public final class CtrlZServer {
 		rollbackInProgress.remove(playerId);
 	}
 
-	/** Forgets the inventory/position baselines so a rollback is never recorded as a new activity. */
+	/** Forgets the inventory/position/effect baselines so a rollback is never recorded as a new activity. */
 	public void resyncBaselines() {
 		for (ServerPlayer player : server.getPlayerList().getPlayers()) {
 			lastInventories.put(player.getUUID(), Recorder.snapshotInventory(player));
 			lastPositions.put(player.getUUID(), player.position());
+			lastEffects.put(player.getUUID(), EffectSnapshots.encode(player));
 		}
 	}
 

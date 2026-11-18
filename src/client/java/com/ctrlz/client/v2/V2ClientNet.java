@@ -39,7 +39,7 @@ public final class V2ClientNet {
 		} catch (IllegalArgumentException e) {
 			status = UndoResult.Status.APPLY_FROZEN;
 		}
-		Component message = Component.translatable(V2Messages.messageKey(status));
+		Component message = V2Messages.message(status, payload.blocked());
 		// Always tag the engine: the whole point is that you can tell which engine answered.
 		message = message.copy().append(Component.literal(" [" + payload.engine() + "]"));
 		client.gui.setOverlayMessage(message, false);

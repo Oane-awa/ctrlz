@@ -19,7 +19,13 @@ public enum ConsequenceKind {
 	ITEM_DURABILITY(10, "durability"),
 	EXPERIENCE(11, "experience"),
 	SCHEDULED_TICK(12, "scheduled_tick"),
-	FLUID_STATE(13, "fluid");
+	FLUID_STATE(13, "fluid"),
+	/**
+	 * Complete status effect set of a player or mob, captured as a native
+	 * {@code MobEffectInstance} stream. Restoring it replaces the whole set, which is the only way to
+	 * bring back exact durations and to clear effects that did not exist yet at capture time.
+	 */
+	ENTITY_EFFECTS(14, "effects");
 
 	private final int id;
 	private final String label;

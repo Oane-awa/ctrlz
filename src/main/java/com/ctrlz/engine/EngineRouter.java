@@ -52,6 +52,16 @@ public final class EngineRouter {
 
 	/** Resolves the engine. Only the first call wins; this is not a toggle. */
 	public static void resolve(Engine engine) {
+		// The v2 engine only covers block break/place and has no history screen at all. Running it as
+		// the active engine would mean the G screen and the Z key execute two different restore
+		// engines with different coverage — the exact inconsistency this fix removes. Until v2 reaches
+		// feature parity everything runs on the unified engine, and this switch disappears together
+		// with the legacy code at the end of stage one.
+		if (engine == Engine.V2) {
+			LOGGER.warn("CtrlZ: ctrlz.engine=v2 is incomplete (block break only) and has no history screen; "
+					+ "running the unified engine so G and Z cannot restore differently.");
+			engine = Engine.LEGACY;
+		}
 		if (resolved) {
 			if (active != engine) {
 				LOGGER.warn("CtrlZ engine is already '{}'; ignoring request to switch to '{}'. "
@@ -61,7 +71,7 @@ public final class EngineRouter {
 		}
 		active = engine;
 		resolved = true;
-		LOGGER.info("CtrlZ engine resolved to '{}'", engine.id());
+		LOGGER.info("CtrlZ engine resolved to '{}' (single execution engine)", engine.id());
 	}
 
 	public static Engine active() {

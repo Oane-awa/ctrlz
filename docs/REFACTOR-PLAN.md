@@ -317,16 +317,57 @@ GameTest 放在 `src/test`；测试里**直接调用内部撤销 API**（`UndoSe
 | 单元测试 | 新增 13 项（`HistoryStackTest`、`TransactionTest`），全仓 **43 项 0 失败** |
 | 构建 | `gradlew build` → BUILD SUCCESSFUL，`ctrlz-1.0.0.jar` 232,685 字节 |
 
-### 7.2 尚未完成（阶段一剩余）
+### 7.2 执行顺序（B 节修订：竖切优先，替代原“分层推进”）
 
-1. `SnapshotCapture`（方块/容器/背包快照 + 多方块完整性 + P2 标记）
-2. `UndoPlannerImpl` / `RestoreApplier` / `ConservationAuditImpl` / `UndoService`（两阶段撤销）
-3. `ActorContext` + `LevelMixin`/`ContainerMenuMixin` 改造、`PlayerBlockBreakEvents`/`UseBlockCallback` 接线
-4. `net/` 两类 payload + 服务端处理器 + 客户端 Z 键去抖
-5. `/undohistory list|dump|purge` 命令
-6. `HistoryPersistence`（读档加载、指纹校验、作废提示）
-7. 三个 GUI 改接新模型；旧 `core/*`、`server/*`、`config`、`net` 整体拆除
-8. §15 的 13 条阶段一 GameTest 用例
+原顺序按层推进（先完整 `SnapshotCapture` → 再完整撤销 → 再接线 → 再网络），第 4 项完成前没有任何可运行路径，
+盲区过长。现按 B 节改为竖切：每个切片都留下一条**可按键验证**的端到端路径。
+
+| 切片 | 范围 | 状态 |
+|---|---|---|
+| 0 | 生存破坏一个普通方块 → 按 Z 恢复 → 再按无变化；含 A 节开关、两阶段骨架、守恒审计接口、`net/`、C 节中止语义 | **已完成**（见 §8） |
+| 1 | 加宽捕获：放置、容器（单箱/双箱）、多方块（床/门）、玩家背包 | 待做（下一步） |
+| 2 | 冲突与守恒完整实现：`afterFingerprints` 全量比对、物品总量哈希、§7.5 全部 12 种状态走通 | 待做 |
+| 3 | 持久化：`HistoryState` 读档、§10.2 四重指纹校验、作废提示 | 待做（`HistoryState` 代码已就绪未接线） |
+| 4 | `/undohistory list\|dump\|purge`、三个 GUI 接新模型 | 命令已完成；GUI 待做 |
+| 5 | 默认切 `v2` → 删除 legacy `core/*`、`server/*`、旧 `config`、旧 `net`、MineTracer 集成、`EngineRouter` 与开关 → §15 全用例 + `gametest.xml` | 待做 |
+
+每个切片的交付要求（B.3）：可编译、可运行、该切片 GameTest 通过、**并由你在游戏里手动验证一次**。
+
+### 7.3 A 节（运行时互斥开关）补充落实
+
+切片 0 已实现 A.3 全部 6 条（逐条对照见 §8.1）。本节补充两条本次新增的可观测性：
+
+| 要求 | 本次补充 |
+|---|---|
+| A.2「仅在世界加载时读取一次」 | `SERVER_STARTED` 时重新读一次配置文件：若 `engine` 已与运行值不同，只打印 `restart the game to switch` 警告，**不切换**（`CtrlZMod.checkEngineUnchanged`） |
+| A.3.3「持久化命名空间隔离」 | 世界加载时打印 `CtrlZ v2 uses SavedData key 'ctrlz:history'; the legacy journal at <path> is ignored and never read`（`V2UndoService.logLegacyNamespace`），把“不交叉读取”变成可核对的事实 |
+
+### 7.4 C 节：撤销中止后的记录语义（已实现）
+
+旧系统缺陷：MineTracer 审计失败既不标记冲突、也不写冷却，`rollbackLast` 命中失败即 return——同一条记录被
+每次按 Z 重新审计、重新失败。v2 在规格层面堵住，实现如下：
+
+| C.2 要求 | 实现 |
+|---|---|
+| 1 置位并缓存失败状态 | `Operation.block(UndoResult.Status, String reason)` 记录 `blockedStatus` + `blockedReason`；预演异常、应用失败、审计失败、崩溃四条路径全部调用 |
+| 2 后续按键直接返回缓存结果，不重跑预演 | `V2UndoService.undo`：取到栈顶后若 `blocked()` 立即 `return operation.blockedResult()`（并记一条 replay 日志） |
+| 3 撤销栈到此为止，不向更旧推进 | 新增 `HistoryStack.undoTarget(tick)`：**不跳过** blocked 记录；`latestUndoable`（会跳过）只保留给单测/列表用 |
+| 4 ActionBar 明说“链在此中断” | `UndoResult.blocked` 字段 + `UndoResultPayload.blocked` → `V2Messages.message(status, blocked)` 渲染 `ctrlz.v2.chain_blocked`（`撤销链已在此处中断：<原因>（可用 /undohistory purge confirm 清空历史）`） |
+| 5 `/undohistory list` 标出 blocked 与原因 | 列表行 `blocked=CONFLICT(reason)`；首行额外提示 `undo chain BLOCKED at #seq` |
+| C.4 blocked 不可逆 + purge 需二次确认 | `/undohistory purge` → 只给提示；`/undohistory purge confirm` 才真正清空 |
+
+注意 C.3：**不要**把“不跳到更旧记录”当 bug 修掉。跳过栈顶会留下较新操作的效果、却套用更旧的快照，
+是 I1/I2 的直接破坏路径。
+
+### 7.5 D 节：MineTracer 集成（止血已做，整体删除留在切片 5）
+
+| 动作 | 落点 |
+|---|---|
+| 默认关闭 | `CtrlZConfig.useMineTracerAudit = false`（原为 `true`），字段注释与语言文件均标注“已废弃，默认关闭” |
+| **对已存在的配置也生效** | `CtrlZConfig.validate()` 每次读取配置时强制把 `useMineTracerAudit` 置回 `false`（GSON 会把旧文件里的 `true` 读回来，只改默认值对老存档无效——这正是“频繁出现”在旧世界里继续发生的原因） |
+| 显式告警 | 旧配置里写过 `true` 时，legacy 启动打印：`the config file asked for useMineTracerAudit, but … force-disabled until the legacy engine is deleted` |
+| 不再推荐安装 | 从 `fabric.mod.json` 移除 `recommends.minetracer` |
+| 不修判定逻辑 | `MineTracerBridge` / `RollbackService` 的审计分支**一行未改**；切片 5 随 legacy 一起删除 |
 
 ## 8. 切片 0 交付记录
 
@@ -352,22 +393,41 @@ GameTest 放在 `src/test`；测试里**直接调用内部撤销 API**（`UndoSe
 | 事务 | `v2/V2Recorder`（破坏开启事务、`addFreshEntity` 捕获掉落物、`setBlock` 记录 after 指纹、超时/退出封口） |
 | 撤销 | `v2/V2UndoService`（提交、选择、限频 200ms、重入保护、RestoreMode）、`v2/UndoPlannerImpl`（预演：加载/冲突/实体存在性）、`v2/RestoreApplier`（应用 + 失败回写）、`v2/ConservationAuditImpl`（守恒审计） |
 | 网络 | `v2/net/UndoRequestPayload`、`v2/net/UndoResultPayload`、`v2/net/V2ServerNet`、`client/v2/V2ClientNet` |
-| 命令 | `command/UndoHistoryCommand`（list / dump / purge） |
+| 命令 | `command/UndoHistoryCommand`（list / dump / purge；`purge` 需 `confirm`） |
+| 中止语义 | `history/Operation#block(Status,reason)` + `Operation#blockedResult()`、`history/HistoryStack#undoTarget`、`history/UndoResult#blocked` |
 | 事件 | `v2/V2Events`（`PlayerBlockBreakEvents.BEFORE/AFTER`） |
 
 ### 8.3 证据
 
 ```
-build/gametest.xml
-  ctrlz:pipeline_game_test_pipeline_boots_and_can_place_blocks        PASS
-  ctrlz:slice0game_test_breaking_stone_can_be_undone_and_is_idempotent PASS
-  ctrlz:slice0game_test_undoing_abreak_removes_the_dropped_item      PASS
-  minecraft:always_pass                                             PASS
-========= 4 GAME TESTS COMPLETE =========  All 4 required tests passed :)
-BUILD SUCCESSFUL in 32s
+build/gametest.xml  (14:35:36Z)
+  minecraft:always_pass                                                       PASS
+  ctrlz:pipeline_game_test_pipeline_boots_and_can_place_blocks                 PASS
+  ctrlz:slice0game_test_breaking_stone_can_be_undone_and_is_idempotent         PASS
+  ctrlz:slice0game_test_undoing_abreak_removes_the_dropped_item                PASS
+  ctrlz:slice0game_test_a_refused_undo_blocks_the_chain_and_never_skips_older_records  PASS
+========= 5 GAME TESTS COMPLETE =========  All 5 required tests passed :)
+BUILD SUCCESSFUL in 1m 12s
 ```
 
-`gradlew build`：BUILD SUCCESSFUL；JUnit **43 项 / 0 失败 0 错误**；产物 `ctrlz-1.0.0.jar`（273,235 字节）。
+`gradlew build`：BUILD SUCCESSFUL；JUnit **46 项 / 0 失败 0 错误**（`HistoryStackTest` 9 项，其中 3 项是本次 C 节新增）；
+产物 `ctrlz-1.0.0.jar`（276,781 字节）。
+
+C 节在真实服务器日志里的样子（同一次 `runGametest`）：
+
+```
+CtrlZ commit op=0cc05c60… type=BREAK_BLOCK coverage=FULL blocks=1 entities=1 bytes=462 history=1
+CtrlZ commit op=af1a77f8… type=BREAK_BLOCK coverage=FULL blocks=1 entities=1 bytes=463 history=2
+CtrlZ undo refused op=af1a77f8… status=CONFLICT reason=… is no longer minecraft:air#0:0 (record blocked, chain stops)
+CtrlZ undo replay  op=af1a77f8… blocked=CONFLICT reason=… is no longer minecraft:air#0:0
+```
+
+第二行 `replay` 就是 C.2 的核心：**同一条记录第二次按键只重放缓存，不再跑预演，也不会去撤销更早的那条**。
+A.3.3 的隔离声明同样在日志里可见：
+`CtrlZ v2 uses SavedData key 'ctrlz:history'; the legacy journal at .\world\.\ctrlz is ignored and never read`。
+
+> 说明：本次 GameTest 跑的是 `engine=legacy` 的配置（`build/gametest/.config/ctrlz.json` 是历史遗留文件），
+> 所以启动时出现了 D 节那条 force-disabled 告警——这正好证明“旧配置写了 `true` 也会被强制关掉”。
 
 ### 8.4 刻意偏差与已知边界（必须知道，否则会误判）
 
@@ -376,6 +436,7 @@ BUILD SUCCESSFUL in 32s
    实体快照目前只存 UUID/类型/坐标，完整 NBT 恢复留给 slice 2。
 2. **守恒审计是"应用后校验 + 失败回写"。** §7.4 希望审计也在预演内，但"删除实体后的物品总量"不落地就无法观测。
    因此：预演阶段取基线 → 应用 → 实测比对 → 不一致则 `RestoreApplier.revert` 回写并冻结该记录（`blocked`）。
+   **冻结是永久的**：该记录成为撤销链的终点，只能 `/undohistory purge confirm` 整体清空（C.2/C.4）。
 3. **v2 下放置方块不会被记录**（slice 1 才做），所以此时按 Z 会去撤销更早的破坏记录。这是预期行为，不是 bug。
 4. **v2 下 G / K 界面暂不可用**（slice 4 迁移），避免展示不属于当前引擎的数据。
 5. **v2 历史目前只在内存**（slice 3 才接 `SavedData`），重启即丢；`HistoryState` 代码已就绪但未接线。
@@ -390,12 +451,21 @@ BUILD SUCCESSFUL in 32s
 4. 按 **Z** → 石头应回来，ActionBar 显示 `已撤销 [v2]`。
 5. 再按一次 **Z** → ActionBar 显示 `没有可撤销的操作 [v2]`，世界不变。
 6. 挖一块泥土，按 Z → 泥土回来，**地上那块泥土掉落物应消失**（这条是防腐的关键）。
-7. 挖一块石头，然后用命令/手动在同位置放别的方块，再按 Z → 应提示 `该区域已发生其他变化 [v2]`，世界不变。
-8. `/undohistory` → 首行 `engine=v2`，随后列出记录。
-9. 改回 `"engine": "legacy"` 重启 → 旧系统照旧工作（G/K 可用），`/undohistory` 会提示 v2 未启用。
+7. 挖一块石头，然后在同位置手动放一个别的方块，再按 Z → ActionBar 应显示
+   `撤销链已在此处中断：该区域已发生其他变化（可用 /undohistory purge confirm 清空历史） [v2]`，
+   世界完全不变；**再按一次 Z 必须显示同一条提示**（缓存重放，不重新预演，也不会去撤销更早的记录）。
+8. `/undohistory` → 首行 `engine=v2`，若链已冻结，首行还会出现 `undo chain BLOCKED at #<seq> (<STATUS>: <原因>)`。
+9. `/undohistory purge` → 只提示需要确认；`/undohistory purge confirm` → 才真正清空。
+10. 改回 `"engine": "legacy"` 重启 → 旧系统照旧工作（G/K 可用），`/undohistory` 会提示 v2 未启用。
 
 请告诉我每条你**实际看到**了什么（尤其是 4/5/6/7），我会按结果修或进入 slice 1。
+
+> 补充（D 节）：`useMineTracerAudit` 现在默认 `false`。若你在旧配置里手动打开过它，legacy 启动时会打印一条
+> 废弃告警；那句 `MineTracer 审计与本地快照不一致。` 在默认配置下不会再出现。
 
 ### 8.6 下一步：切片 1（加宽捕获）
 
 放置方块 → 单箱/双箱 → 床/门 → 玩家背包；每加一类补 `Snapshot` 实现、守恒审计覆盖与 GameTest。
+
+> 顺序依据 B 节（竖切）。切片 0 的骨架已经跑通“按键 → 网络 → 线程切换 → 事务 → 快照 → 两阶段恢复 →
+> 幂等/冻结 → 反馈”，切片 1 只在这条骨架上加宽，不再引入新的架构假设。

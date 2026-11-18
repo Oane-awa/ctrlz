@@ -4,95 +4,316 @@ import com.ctrlz.core.activity.ActivityRecord;
 import com.ctrlz.core.activity.ActivityStatus;
 import com.ctrlz.core.consequence.ConsequenceKind;
 import com.ctrlz.core.consequence.ConsequenceRecord;
-import com.ctrlz.core.consequence.ConsequenceStatus;
 import com.ctrlz.core.rollback.ConflictType;
 import com.ctrlz.core.rollback.ConsequenceCollapser;
+import com.ctrlz.core.rollback.RestorePlan;
 import com.ctrlz.core.rollback.RollbackEngine;
 import com.ctrlz.core.rollback.RollbackListener;
+import com.ctrlz.core.storage.ActivityStore;
 import com.ctrlz.core.util.ByteIO;
 import net.minecraft.core.BlockPos;
 import net.minecraft.network.chat.Component;
 import net.minecraft.server.level.ServerPlayer;
 
+import java.util.ArrayList;
+import java.util.Comparator;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Set;
+import java.util.UUID;
 
 /**
- * Entry point for in game rollbacks.
+ * The one and only restore entry point.
  *
- * <p>Order of operations: seal what is still being recorded, permission check, collapse repeated
- * changes of one target, MineTracer cross audit (when installed), then a transactional restore that
- * either completes or is reverted completely.
+ * <p>Both the {@code G} screen (a clicked row) and the {@code Z} key end up here:
+ * <ul>
+ * <li>{@code G} → {@link #restoreToActivity} → restore the state that activity left behind, keeping it</li>
+ * <li>{@code Z} → {@link #restoreLast} → the server picks the newest rollbackable action and undoes it,
+ * which also removes it from the history</li>
+ * </ul>
+ * They differ only in which node is the anchor and whether the anchor survives; the plan, the state
+ * checks, the two phase apply, the truncation and the result object are shared. Keeping two separate
+ * code paths is what previously made a GUI restore and a hotkey undo produce different worlds.
+ *
+ * <p>Order of operations (a partial restore is never reported as a success):
+ * <ol>
+ * <li>seal whatever is still being recorded, so the newest action is part of the decision</li>
+ * <li>collect every one of this player's activities after the anchor, newest first</li>
+ * <li>validate all of them (target existence, state conflicts, multi block completeness) before
+ * writing anything</li>
+ * <li>apply the inverse consequences, newest activity first</li>
+ * <li>only after every activity was restored: delete the records after the anchor and flush</li>
+ * </ol>
+ * If a write fails midway, the already restored activities are re-applied forward, the history is left
+ * untouched and the failure is reported with its reason.
  */
 public final class RollbackService {
+	private static final org.slf4j.Logger LOGGER = org.slf4j.LoggerFactory.getLogger("CtrlZ");
+
 	private RollbackService() {
 	}
 
-	public record Result(boolean success, int restored, String conflict, String messageKey) {
+	/**
+	 * One result shape for both entry points.
+	 *
+	 * @param activities how many recorded operations were undone
+	 * @param restored   how many recorded consequences were written back
+	 * @param skipped    consequences that could not be attributed and were left alone
+	 * @param truncated  whether the newer history records were actually deleted
+	 */
+	public record Result(boolean success, long targetActivityId, int activities, int restored, int skipped,
+			boolean truncated, String conflict, String messageKey, String detail) {
+
+		static Result refusal(String conflict, String messageKey) {
+			return new Result(false, 0L, 0, 0, 0, false, conflict, messageKey, "");
+		}
+
+		Result withTarget(long id) {
+			return new Result(success, id, activities, restored, skipped, truncated, conflict, messageKey, detail);
+		}
 	}
 
-	public static Result rollback(ServerPlayer actor, long activityId) {
+	/** {@code G} row click: restore the state recorded after {@code activityId}, keeping that record. */
+	public static Result restoreToActivity(ServerPlayer actor, long activityId) {
+		return restore(actor, activityId, true);
+	}
+
+	/**
+	 * {@code Z}: the newest rollbackable action becomes the anchor and is undone, so it also leaves the
+	 * history. Walks are never chosen here — undoing one would teleport the player instead of undoing
+	 * the block or item change they meant — but an explicit GUI restore does rewind them, because a
+	 * restore has to reproduce the whole recorded state of the node.
+	 */
+	public static Result restoreLast(ServerPlayer actor) {
 		CtrlZServer hub = CtrlZServer.get();
 		if (hub == null || hub.store() == null) {
-			return new Result(false, 0, "unavailable", "ctrlz.result.no_store");
+			return Result.refusal("unavailable", "ctrlz.result.no_store");
+		}
+		hub.flushSession(actor.getUUID());
+		for (ActivityRecord activity : hub.store().recentActivities(actor.getUUID(), 96)) {
+			if (!activity.status().isRollbackCandidate() || hub.store().consequenceCount(activity.id()) == 0
+					|| hub.isConflicted(activity.id()) || activity.kind().isMovementKind()) {
+				continue;
+			}
+			return restore(actor, activity.id(), false);
+		}
+		return Result.refusal("empty", "ctrlz.result.nothing_to_rollback");
+	}
+
+	/** The single implementation used by both entry points. */
+	public static Result restore(ServerPlayer actor, long targetActivityId, boolean keepTarget) {
+		CtrlZServer hub = CtrlZServer.get();
+		if (hub == null || hub.store() == null) {
+			return Result.refusal("unavailable", "ctrlz.result.no_store");
 		}
 		// Everything below touches world state, so it must run on the server thread.
 		if (!hub.server().isSameThread()) {
-			hub.server().execute(() -> rollback(actor, activityId));
-			return new Result(false, 0, "busy", "ctrlz.result.busy");
+			hub.server().execute(() -> restore(actor, targetActivityId, keepTarget));
+			return Result.refusal("busy", "ctrlz.result.busy");
 		}
-		if (!hub.tryBeginRollback(actor.getUUID())) {
+		UUID playerId = actor.getUUID();
+		if (!hub.tryBeginRollback(playerId)) {
 			// Fast repeated presses must never run the same transaction twice.
-			return new Result(false, 0, "busy", "ctrlz.result.busy");
+			return Result.refusal("busy", "ctrlz.result.busy");
 		}
 		try {
-			return rollbackNow(actor, hub, activityId);
+			return restoreNow(actor, hub, targetActivityId, keepTarget);
 		} finally {
-			hub.endRollback(actor.getUUID());
+			hub.endRollback(playerId);
 		}
 	}
 
-	private static Result rollbackNow(ServerPlayer actor, CtrlZServer hub, long activityId) {
-		ActivityRecord activity = hub.store().byId(activityId);
-		if (activity == null) {
-			return new Result(false, 0, "missing", "ctrlz.result.not_found");
-		}
-		boolean ownActivity = activity.playerId().equals(actor.getUUID());
-		int required = ownActivity ? 0 : hub.config().rollbackPermissionLevel;
-		if (!Permissions.hasLevel(actor, required)) {
-			return new Result(false, 0, "permission", "ctrlz.result.no_permission");
+	private static Result restoreNow(ServerPlayer actor, CtrlZServer hub, long targetActivityId, boolean keepTarget) {
+		ActivityStore store = hub.store();
+		ActivityRecord target = store.byId(targetActivityId);
+		if (target == null) {
+			return Result.refusal("missing", "ctrlz.result.not_found");
 		}
 		// The activity the player just did is still open, and an open activity has no complete
-		// consequence list yet. Closing it first is what makes "undo what I just did" possible.
-		hub.sealIfOpen(activity);
-		if (!activity.status().isRollbackCandidate()) {
-			String key = activity.status() == ActivityStatus.ROLLED_BACK ? "ctrlz.result.already_rolled_back"
+		// consequence list yet. Sealing first is what makes "undo what I just did" possible.
+		hub.flushSession(target.playerId());
+		boolean ownActivity = target.playerId().equals(actor.getUUID());
+		int required = ownActivity ? 0 : hub.config().rollbackPermissionLevel;
+		if (!Permissions.hasLevel(actor, required)) {
+			return Result.refusal("permission", "ctrlz.result.no_permission");
+		}
+		if (!target.status().isRollbackCandidate()) {
+			String key = target.status() == ActivityStatus.ROLLED_BACK ? "ctrlz.result.already_rolled_back"
 					: "ctrlz.result.not_rollbackable";
-			return new Result(false, 0, "status", key);
+			return Result.refusal("status", key);
 		}
 		Long last = hub.lastRollbackMillis().get(actor.getUUID());
 		long now = System.currentTimeMillis();
 		if (last != null && now - last < hub.config().rollbackCooldownTicks * 50L) {
-			return new Result(false, 0, "cooldown", "ctrlz.result.cooldown");
+			return Result.refusal("cooldown", "ctrlz.result.cooldown");
 		}
-		List<ConsequenceRecord> consequences = ConsequenceCollapser.collapse(hub.store().consequences(activityId));
-		if (consequences.isEmpty()) {
-			return new Result(false, 0, "empty", "ctrlz.result.nothing_to_rollback");
+		if (!keepTarget && store.consequenceCount(target.id()) == 0) {
+			return Result.refusal("empty", "ctrlz.result.nothing_to_rollback");
 		}
-		Result incomplete = checkStructures(consequences);
-		if (incomplete != null) {
-			hub.markConflicted(activityId);
-			return incomplete;
+
+		List<Group> groups = collectGroups(hub, target, keepTarget);
+		if (!keepTarget && groups.isEmpty()) {
+			return Result.refusal("empty", "ctrlz.result.nothing_to_rollback");
 		}
-		if (hub.config().useMineTracerAudit) {
-			MineTracerBridge.Audit audit = MineTracerBridge.audit(activity, consequences);
-			if (audit.conflict()) {
-				return new Result(false, 0, "audit", "ctrlz.result.audit_conflict");
+		ServerRestorer restorer = new ServerRestorer(hub.server(), pickedUpInBatch(groups));
+
+		// Phase 1: validate everything before the first write.
+		for (Group group : groups) {
+			Result incomplete = checkStructures(group.consequences());
+			if (incomplete != null) {
+				hub.markConflicted(target.id());
+				return incomplete.withTarget(target.id());
+			}
+			for (ConsequenceRecord consequence : group.consequences()) {
+				if (!consequence.origin().isAttributable()) {
+					continue;
+				}
+				ConflictType conflict = restorer.check(consequence);
+				if (conflict.isBlocking()) {
+					hub.markConflicted(target.id());
+					LOGGER.info("CtrlZ restore refused target={} activity={} conflict={} kind={}", target.id(),
+							group.activity().id(), conflict, consequence.kind().label());
+					return new Result(false, target.id(), 0, 0, 0, false, conflict.name(), messageFor(conflict),
+							consequence.kind().label() + "@" + consequence.tick());
+				}
 			}
 		}
-		hub.lastRollbackMillis().put(actor.getUUID(), now);
-		return execute(actor, hub, activity, consequences);
+
+		// Phase 2: apply, newest activity first. A failure re-applies what was already undone.
+		int restored = 0;
+		int skipped = 0;
+		List<Group> undone = new ArrayList<>();
+		ConflictType failure = null;
+		String failureDetail = "";
+		hub.beginSuppression();
+		try {
+			for (Group group : groups) {
+				RollbackEngine.Outcome outcome = RollbackEngine.rollback(group.consequences(), restorer,
+						new RollbackListener() {
+							@Override
+							public void onConflict(ConsequenceRecord consequence, ConflictType conflict) {
+							}
+
+							@Override
+							public void onRestored(ConsequenceRecord consequence) {
+							}
+
+							@Override
+							public void onSkipped(ConsequenceRecord consequence, String reason) {
+							}
+
+							@Override
+							public void onRevertedTransaction(ConsequenceRecord consequence) {
+							}
+						});
+				if (!outcome.success()) {
+					failure = outcome.conflict();
+					failureDetail = outcome.reason();
+					break;
+				}
+				restored += outcome.restored();
+				skipped += outcome.skipped();
+				undone.add(group);
+			}
+			if (failure != null) {
+				// Nothing is truncated on failure: the history still describes the world we restored.
+				for (int index = undone.size() - 1; index >= 0; index--) {
+					reapply(restorer, undone.get(index));
+				}
+				hub.markConflicted(target.id());
+				LOGGER.warn("CtrlZ restore aborted target={} conflict={} reason={}; {} activities re-applied",
+						target.id(), failure, failureDetail, undone.size());
+				return new Result(false, target.id(), 0, 0, 0, false, failure.name(), messageFor(failure),
+						failureDetail);
+			}
+
+			// Phase 3: the world now is the anchor node, so the newer records are obsolete.
+			long anchor = keepTarget ? target.id() : target.id() - 1L;
+			int deleted;
+			try {
+				deleted = store.deleteActivitiesAfter(target.playerId(), anchor);
+				store.flush(true);
+			} catch (java.io.IOException e) {
+				// The world is already at the anchor, but the history still lists operations that no
+				// longer describe it. Reporting that is better than a success the next restart would
+				// contradict, and it can be retried after the disk problem is gone.
+				LOGGER.error("CtrlZ restored target={} but could not truncate the history", target.id(), e);
+				hub.resyncBaselines();
+				return new Result(false, target.id(), groups.size(), restored, skipped, false, "truncate_failed",
+						"ctrlz.result.truncate_failed", String.valueOf(e.getMessage()));
+			}
+			hub.lastRollbackMillis().put(actor.getUUID(), now);
+			if (hub.config().announceRollback) {
+				actor.sendSystemMessage(Component.translatable("ctrlz.notice.rolled_back", restored));
+			}
+			LOGGER.info("CtrlZ restore ok target={} keep={} activities={} restored={} truncated={}", target.id(),
+					keepTarget, groups.size(), restored, deleted);
+			return new Result(true, target.id(), groups.size(), restored, skipped, deleted > 0, "", "ctrlz.result.ok",
+					"");
+		} finally {
+			hub.endSuppression();
+			// What the restore changed must not be recorded as a new activity on the next tick.
+			hub.resyncBaselines();
+			safeFlush(hub);
+		}
+	}
+
+	private record Group(ActivityRecord activity, List<ConsequenceRecord> consequences) {
+	}
+
+	/**
+	 * Every one of the owner's activities after the anchor, newest first.
+	 *
+	 * <p>The anchor itself is excluded when it has to survive (GUI) and included when it is the thing
+	 * being undone (Z). Records that can never be restored, and already undone ones, are skipped for
+	 * the state changes but still deleted with the rest of the branch.
+	 */
+	private static List<Group> collectGroups(CtrlZServer hub, ActivityRecord target, boolean keepTarget) {
+		List<ActivityRecord> feed = hub.store().recentActivities(target.playerId(), 1024);
+		List<RestorePlan.Node> nodes = new ArrayList<>(feed.size());
+		for (ActivityRecord record : feed) {
+			nodes.add(new RestorePlan.Node(record.id(), record.playerId(), record.status(),
+					record.kind().isMovementKind()));
+		}
+		List<Long> victims = RestorePlan.victims(nodes, target.id(), target.playerId(), keepTarget);
+		List<Group> groups = new ArrayList<>(victims.size());
+		for (Long id : victims) {
+			ActivityRecord victim = hub.store().byId(id);
+			if (victim == null) {
+				continue;
+			}
+			groups.add(new Group(victim, ConsequenceCollapser.collapse(hub.store().consequences(id))));
+		}
+		return groups;
+	}
+
+	/** Item entities that this batch itself puts back, so their pickups are not treated as external. */
+	private static Set<String> pickedUpInBatch(List<Group> groups) {
+		Set<String> pickedUp = new HashSet<>();
+		for (Group group : groups) {
+			for (ConsequenceRecord consequence : group.consequences()) {
+				if (consequence.kind() == ConsequenceKind.ITEM_ENTITY_SPAWN && consequence.after().length == 0) {
+					pickedUp.add(consequence.subject());
+				}
+			}
+		}
+		return pickedUp;
+	}
+
+	/** Forward re-apply in causal order, used to undo an aborted multi activity restore. */
+	private static void reapply(ServerRestorer restorer, Group group) {
+		List<ConsequenceRecord> ordered = new ArrayList<>(group.consequences());
+		ordered.sort(Comparator.comparingInt(ConsequenceRecord::tick).thenComparingLong(ConsequenceRecord::id));
+		for (ConsequenceRecord consequence : ordered) {
+			if (!consequence.origin().isAttributable()) {
+				continue;
+			}
+			try {
+				restorer.reapply(consequence);
+			} catch (RuntimeException ignored) {
+				// Best effort: the failure itself is already being reported.
+			}
+		}
 	}
 
 	/**
@@ -123,98 +344,10 @@ public final class RollbackService {
 				continue;
 			}
 			if (!positions.contains(ByteIO.packBlockPos(sibling.getX(), sibling.getY(), sibling.getZ()))) {
-				return new Result(false, 0, "incomplete_structure", "ctrlz.result.incomplete_structure");
+				return Result.refusal("incomplete_structure", "ctrlz.result.incomplete_structure");
 			}
 		}
 		return null;
-	}
-
-	/**
-	 * Newest rollbackable <em>action</em> of the player.
-	 *
-	 * <p>Walking is never undone by the hotkey: a walk carries a player position, so undoing it after
-	 * a block operation would teleport the player instead of restoring the block, and waiting a while
-	 * would silently change what the key does. Movement stays available from the history screen,
-	 * where the row is chosen explicitly.
-	 *
-	 * <p>Activities without any consequence are skipped ("rolling them back" would report success
-	 * while changing nothing), and activities whose state check just failed are skipped for a while
-	 * so one conflicting entry cannot disable the hotkey.
-	 */
-	public static Result rollbackLast(ServerPlayer actor) {
-		CtrlZServer hub = CtrlZServer.get();
-		if (hub == null || hub.store() == null) {
-			return new Result(false, 0, "unavailable", "ctrlz.result.no_store");
-		}
-		hub.flushSession(actor.getUUID());
-		for (ActivityRecord activity : hub.store().recentActivities(actor.getUUID(), 96)) {
-			if (!activity.status().isRollbackCandidate() || hub.store().consequenceCount(activity.id()) == 0
-					|| hub.isConflicted(activity.id()) || activity.kind().isMovementKind()) {
-				continue;
-			}
-			return rollback(actor, activity.id());
-		}
-		return new Result(false, 0, "empty", "ctrlz.result.nothing_to_rollback");
-	}
-
-	private static Result execute(ServerPlayer actor, CtrlZServer hub, ActivityRecord activity,
-			List<ConsequenceRecord> consequences) {
-		Set<String> pickedUpInBatch = new HashSet<>();
-		for (ConsequenceRecord consequence : consequences) {
-			if (consequence.kind() == ConsequenceKind.ITEM_ENTITY_SPAWN && consequence.after().length == 0) {
-				pickedUpInBatch.add(consequence.subject());
-			}
-		}
-		hub.beginSuppression();
-		try {
-			final int[] restored = { 0 };
-			RollbackEngine.Outcome outcome = RollbackEngine.rollback(consequences,
-					new ServerRestorer(hub.server(), pickedUpInBatch), new RollbackListener() {
-						@Override
-						public void onConflict(ConsequenceRecord consequence, ConflictType conflict) {
-						}
-
-						@Override
-						public void onRestored(ConsequenceRecord consequence) {
-							restored[0]++;
-							recordStatus(hub, consequence, ConsequenceStatus.ROLLED_BACK);
-						}
-
-						@Override
-						public void onSkipped(ConsequenceRecord consequence, String reason) {
-							recordStatus(hub, consequence, ConsequenceStatus.SKIPPED);
-						}
-
-						@Override
-						public void onRevertedTransaction(ConsequenceRecord consequence) {
-							recordStatus(hub, consequence, ConsequenceStatus.PENDING);
-						}
-					});
-			if (outcome.success()) {
-				activity.setStatus(ActivityStatus.ROLLED_BACK, "");
-				safeUpdateStatus(hub, activity);
-				if (hub.config().announceRollback) {
-					actor.sendSystemMessage(Component.translatable("ctrlz.notice.rolled_back", restored[0]));
-				}
-				return new Result(true, outcome.restored(), "", "ctrlz.result.ok");
-			}
-			// Remember the failure so the hotkey moves on to the next activity instead of retrying
-			// the same impossible one forever.
-			hub.markConflicted(activity.id());
-			// A state conflict is not permanent: the player can undo the newer activity first and
-			// try again. Only what can never be restored is marked as such.
-			if (outcome.conflict() == ConflictType.UNSUPPORTED_MODDED_STATE
-					|| outcome.conflict() == ConflictType.NO_SNAPSHOT) {
-				activity.setStatus(ActivityStatus.NOT_ROLLBACKABLE, "ctrlz.reason.unsupported");
-				safeUpdateStatus(hub, activity);
-			}
-			return new Result(false, 0, outcome.conflict().name(), messageFor(outcome.conflict()));
-		} finally {
-			hub.endSuppression();
-			// What the rollback changed must not be recorded as a new activity on the next tick.
-			hub.resyncBaselines();
-			safeFlush(hub);
-		}
 	}
 
 	private static String messageFor(ConflictType conflict) {
@@ -226,24 +359,9 @@ public final class RollbackService {
 		};
 	}
 
-	private static void safeUpdateStatus(CtrlZServer hub, ActivityRecord activity) {
-		try {
-			hub.store().updateStatus(activity);
-			hub.store().flush(false);
-		} catch (Exception ignored) {
-		}
-	}
-
 	private static void safeFlush(CtrlZServer hub) {
 		try {
 			hub.store().flush(true);
-		} catch (Exception ignored) {
-		}
-	}
-
-	private static void recordStatus(CtrlZServer hub, ConsequenceRecord consequence, ConsequenceStatus status) {
-		try {
-			hub.store().appendConsequenceStatus(consequence.id(), status);
 		} catch (Exception ignored) {
 		}
 	}

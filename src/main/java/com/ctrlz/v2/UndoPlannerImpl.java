@@ -46,6 +46,8 @@ public final class UndoPlannerImpl {
 		for (Snapshot snapshot : operation.snapshots()) {
 			if (snapshot instanceof Snapshot.Block block) {
 				steps.add(planBlock(operation, block, level));
+			} else if (snapshot instanceof Snapshot.PlayerState state) {
+				steps.add(planPlayerState(operation, state));
 			} else if (snapshot instanceof Snapshot.Entity entity && !entity.existedBefore()) {
 				Entity live = level.getEntity(entity.uuid());
 				if (live == null) {
@@ -67,6 +69,21 @@ public final class UndoPlannerImpl {
 			throw new UndoResult.PlanException(UndoResult.Status.COVERAGE_NONE, "no steps");
 		}
 		return new UndoResult.Plan(operation, List.copyOf(steps), audit.counts(operation));
+	}
+
+	private UndoResult.Plan.Step planPlayerState(Operation operation, Snapshot.PlayerState state)
+			throws UndoResult.PlanException {
+		net.minecraft.server.level.ServerPlayer player = server.getPlayerList().getPlayer(operation.playerUuid());
+		if (player == null) {
+			throw new UndoResult.PlanException(UndoResult.Status.CONFLICT,
+					"player " + operation.playerUuid() + " is not online");
+		}
+		if (!com.ctrlz.server.EffectSnapshots.isCaptured(state.effects())) {
+			throw new UndoResult.PlanException(UndoResult.Status.COVERAGE_NONE, "effects were not captured");
+		}
+		// The live effect set is what a failed apply has to write back.
+		return new UndoResult.Plan.Step(state,
+				new RestoreApplier.PreviousEffects(player, com.ctrlz.server.EffectSnapshots.encode(player)));
 	}
 
 	private UndoResult.Plan.Step planBlock(Operation operation, Snapshot.Block block, ServerLevel level)

@@ -45,6 +45,28 @@ public final class HistoryStack {
 	}
 
 	/**
+	 * The record the undo key <em>must</em> act on, blocked or not.
+	 *
+	 * <p>This is the rule that keeps the undo strictly LIFO: once the newest restorable record is
+	 * blocked, the chain stops there. {@link #latestUndoable(long)} would silently skip it and undo an
+	 * older record instead, which leaves the newer changes in the world while applying snapshots that
+	 * were captured before those changes existed — the classic item duplication path.
+	 */
+	public Operation undoTarget(long playTick) {
+		var iterator = operations.descendingIterator();
+		while (iterator.hasNext()) {
+			Operation operation = iterator.next();
+			if (operation.undone() || operation.isExpired(playTick)
+					|| operation.type() == com.ctrlz.history.OperationType.MOVE
+					|| !operation.coverage().isUndoable()) {
+				continue;
+			}
+			return operation;
+		}
+		return null;
+	}
+
+	/**
 	 * The operation the undo key acts on: newest first, skipping undone, blocked, expired,
 	 * coverage NONE and movement records.
 	 */

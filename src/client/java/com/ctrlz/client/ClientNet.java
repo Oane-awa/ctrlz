@@ -14,6 +14,9 @@ public final class ClientNet {
 	private static Messages.DetailDto detail;
 	private static CtrlZConfig config;
 	private static Messages.RollbackResultDto lastResult;
+	/** The query of the last history request, so a successful restore can re-fetch the same page. */
+	private static Messages.QueryDto lastQuery;
+	private static boolean detailMissing;
 
 	private ClientNet() {
 	}
@@ -31,6 +34,7 @@ public final class ClientNet {
 			}
 			case Messages.S2C_DETAIL -> {
 				detail = Messages.GSON.fromJson(payload.data(), Messages.DetailDto.class);
+				detailMissing = false;
 				refreshScreen();
 			}
 			case Messages.S2C_CONFIG -> {
@@ -42,12 +46,23 @@ public final class ClientNet {
 			}
 			case Messages.S2C_ROLLBACK_RESULT -> {
 				lastResult = Messages.GSON.fromJson(payload.data(), Messages.RollbackResultDto.class);
+				if (lastResult != null && lastResult.success()) {
+					// A restore rewrites the history (newer rows are gone), so the list on screen must
+					// come from the server again instead of being patched locally.
+					Messages.QueryDto query = lastQuery != null ? lastQuery : Messages.QueryDto.defaultQuery(0);
+					requestHistory(query.offset(), query);
+				}
 				refreshScreen();
 			}
 			case Messages.S2C_NOTICE -> {
 				Messages.NoticeDto notice = Messages.GSON.fromJson(payload.data(), Messages.NoticeDto.class);
 				if (notice != null) {
-					lastResult = new Messages.RollbackResultDto(false, 0, "notice", notice.key());
+					if ("ctrlz.gui.detail_missing".equals(notice.key())) {
+						detailMissing = true;
+						detail = null;
+					} else {
+						lastResult = Messages.RollbackResultDto.notice(notice.key());
+					}
 				}
 				refreshScreen();
 			}
@@ -71,6 +86,11 @@ public final class ClientNet {
 		return detail;
 	}
 
+	/** True when the server said the detail record no longer exists (truncated by a restore). */
+	public static boolean detailMissing() {
+		return detailMissing;
+	}
+
 	public static CtrlZConfig config() {
 		return config;
 	}
@@ -86,6 +106,7 @@ public final class ClientNet {
 
 	public static void requestHistory(int offset, Messages.QueryDto query) {
 		Messages.QueryDto actual = query == null ? Messages.QueryDto.defaultQuery(offset) : query;
+		lastQuery = actual;
 		send(Messages.C2S_REQUEST_HISTORY, Messages.GSON.toJson(actual));
 	}
 

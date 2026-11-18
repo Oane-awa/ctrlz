@@ -65,6 +65,47 @@ class HistoryStackTest {
 	}
 
 	@Test
+	void undoTargetStopsAtABlockedRecordInsteadOfSkippingIt() {
+		HistoryStack stack = new HistoryStack();
+		Operation older = operation(1, 10, OperationType.BREAK_BLOCK, 1);
+		Operation newer = operation(2, 11, OperationType.BREAK_BLOCK, 1);
+		stack.add(older, 11);
+		stack.add(newer, 11);
+
+		newer.block(UndoResult.Status.CONFLICT, "someone rebuilt there");
+
+		assertEquals(newer, stack.undoTarget(11), "the blocked top record is still the undo target");
+		assertEquals(older, stack.latestUndoable(11),
+				"the skip-blocked selector would have undone the older record — the old behaviour v2 forbids");
+
+		newer.markUndone();
+		assertEquals(older, stack.undoTarget(11), "only an undone record lets the chain move down");
+	}
+
+	@Test
+	void blockedRecordReplaysItsCachedResultAndIsNotUndoable() {
+		Operation operation = operation(1, 10, OperationType.BREAK_BLOCK, 1);
+		operation.block(UndoResult.Status.AUDIT_FAILED, "chest 1 -> 2");
+
+		UndoResult result = operation.blockedResult();
+		assertTrue(result.blocked());
+		assertFalse(result.success());
+		assertEquals(UndoResult.Status.AUDIT_FAILED, result.status());
+		assertEquals("chest 1 -> 2", result.detail());
+		assertEquals(UndoResult.Status.AUDIT_FAILED, operation.blockedStatus());
+		assertFalse(operation.isUndoable(11), "a blocked record must never run the dry run again");
+	}
+
+	@Test
+	void plainRefusalDoesNotBlockTheRecord() {
+		Operation operation = operation(1, 10, OperationType.BREAK_BLOCK, 1);
+		assertFalse(UndoResult.of(UndoResult.Status.BUSY).blocked());
+		assertFalse(operation.blocked());
+		assertFalse(operation.blockedResult().blocked());
+		assertTrue(operation.isUndoable(11));
+	}
+
+	@Test
 	void memoryLimitEvictsOldestEvenInsideTheWindow() {
 		HistoryStack stack = new HistoryStack();
 		int blockCount = 4096;

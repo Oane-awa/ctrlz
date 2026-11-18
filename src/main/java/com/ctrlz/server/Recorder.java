@@ -149,7 +149,7 @@ public final class Recorder {
 					packed, living.getStringUUID(), health, health,
 					"attack " + label + (critical ? " (critical)" : ""), 0L);
 			queueHealthCapture(activity, living.blockPosition(), dimensionOf(level), living.getHealth(),
-					living.getUUID());
+					living.getUUID(), EffectSnapshots.encode(living));
 		}
 	}
 
@@ -233,19 +233,26 @@ public final class Recorder {
 	private static final java.util.Map<java.util.UUID, PendingAttack> PENDING_ATTACKS = new java.util.LinkedHashMap<>();
 
 	private record PendingAttack(long activityId, java.util.UUID playerId, float healthBefore, String dimension,
-			long packed) {
+			long packed, byte[] effectsBefore, int tick) {
 	}
 
 	public static void queueHealthCapture(ActivityRecord activity, net.minecraft.core.BlockPos pos, String dimension,
-			float healthBefore, java.util.UUID target) {
+			float healthBefore, java.util.UUID target, byte[] effectsBefore) {
 		if (activity == null) {
 			return;
 		}
 		PENDING_ATTACKS.put(target, new PendingAttack(activity.id(), activity.playerId(), healthBefore, dimension,
-				ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ())));
+				ByteIO.packBlockPos(pos.getX(), pos.getY(), pos.getZ()), effectsBefore,
+				CtrlZServer.get() == null ? 0 : CtrlZServer.get().currentTick()));
 	}
 
-	/** Resolves queued attack targets once the damage has actually been applied. */
+	/**
+	 * Resolves queued attack targets once damage and effect changes have actually been applied.
+	 *
+	 * <p>Both halves are checked here because one attack can do either or both: a plain hit changes
+	 * health, a potion tipped arrow changes the target's effects a tick later. The entry is dropped
+	 * when nothing changed, after a short grace period, so the map cannot grow forever.
+	 */
 	public static void tickPending() {
 		if (PENDING_ATTACKS.isEmpty()) {
 			return;
@@ -255,6 +262,7 @@ public final class Recorder {
 			PENDING_ATTACKS.clear();
 			return;
 		}
+		int tick = hub.currentTick();
 		java.util.List<java.util.UUID> done = new java.util.ArrayList<>();
 		for (java.util.Map.Entry<java.util.UUID, PendingAttack> entry : PENDING_ATTACKS.entrySet()) {
 			PendingAttack pending = entry.getValue();
@@ -269,14 +277,32 @@ public final class Recorder {
 				continue;
 			}
 			float health = living.getHealth();
-			if (health == pending.healthBefore()) {
+			byte[] effects = EffectSnapshots.encode(living);
+			boolean healthChanged = health != pending.healthBefore();
+			boolean effectsChanged = !java.util.Arrays.equals(pending.effectsBefore(), effects);
+			if (!healthChanged && !effectsChanged) {
+				if (tick - pending.tick() <= 40) {
+					continue;
+				}
+				done.add(entry.getKey());
 				continue;
 			}
-			hub.consequence(activity, ConsequenceKind.ENTITY_HEALTH, ConsequenceOrigin.DIRECT, pending.dimension(),
-					pending.packed(), entry.getKey().toString(),
-					Float.toString(pending.healthBefore()).getBytes(StandardCharsets.UTF_8),
-					Float.toString(health).getBytes(StandardCharsets.UTF_8),
-					"health " + pending.healthBefore() + " -> " + health, 0L);
+			if (healthChanged) {
+				hub.consequence(activity, ConsequenceKind.ENTITY_HEALTH, ConsequenceOrigin.DIRECT,
+						pending.dimension(), pending.packed(), entry.getKey().toString(),
+						Float.toString(pending.healthBefore()).getBytes(StandardCharsets.UTF_8),
+						Float.toString(health).getBytes(StandardCharsets.UTF_8),
+						"health " + pending.healthBefore() + " -> " + health, 0L);
+			}
+			if (effectsChanged) {
+				net.minecraft.core.RegistryAccess registries = living.level().registryAccess();
+				hub.consequence(activity, ConsequenceKind.ENTITY_EFFECTS, ConsequenceOrigin.DIRECT,
+						pending.dimension(), pending.packed(), "entity#" + entry.getKey(),
+						pending.effectsBefore(), effects,
+						"effects " + EffectSnapshots.describe(pending.effectsBefore(), registries) + " -> "
+								+ EffectSnapshots.describe(effects, registries),
+						0L);
+			}
 			done.add(entry.getKey());
 		}
 		for (java.util.UUID uuid : done) {

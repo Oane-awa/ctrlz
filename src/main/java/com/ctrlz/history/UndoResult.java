@@ -6,8 +6,13 @@ import java.util.Map;
 /**
  * Result of an undo attempt. Every failure path of the spec has its own status so the action bar can
  * explain what happened instead of silently doing nothing.
+ *
+ * <p>{@code blocked} is the difference between "this attempt failed" and "this record is frozen for
+ * good". A blocked record ends the undo chain: the failure is cached on the operation, later key
+ * presses replay the cached answer without running the dry run again, and the undo never moves on to
+ * an older record (skipping would break LIFO and can duplicate items).
  */
-public record UndoResult(Status status, int restored, String detail) {
+public record UndoResult(Status status, int restored, String detail, boolean blocked) {
 	public enum Status {
 		OK,
 		DISABLED,
@@ -25,12 +30,30 @@ public record UndoResult(Status status, int restored, String detail) {
 		NOT_SERVER_THREAD
 	}
 
+	/** Non blocking result; the record stays undoable. */
+	public UndoResult(Status status, int restored, String detail) {
+		this(status, restored, detail, false);
+	}
+
 	public static UndoResult of(Status status) {
 		return new UndoResult(status, 0, "");
 	}
 
 	public static UndoResult of(Status status, String detail) {
 		return new UndoResult(status, 0, detail);
+	}
+
+	/**
+	 * Refusal that freezes the record. Used for every abort that happened during the dry run and
+	 * for the post-apply audit, because re-running those checks would keep producing the same answer
+	 * (and possibly a different one, which is worse).
+	 */
+	public static UndoResult blocked(Status status, String detail) {
+		return new UndoResult(status, 0, detail, true);
+	}
+
+	public UndoResult asBlocked() {
+		return new UndoResult(status, restored, detail, true);
 	}
 
 	public boolean success() {

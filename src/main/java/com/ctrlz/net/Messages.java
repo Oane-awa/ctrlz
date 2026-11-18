@@ -59,7 +59,20 @@ public final class Messages {
 	public record RollbackRequestDto(long activityId, boolean rollbackLast) {
 	}
 
-	public record RollbackResultDto(boolean success, int restored, String conflict, String message) {
+	/**
+	 * The single answer shape of a restore, shared by the GUI row click and the Z hotkey.
+	 *
+	 * <p>{@code activities} / {@code restored} / {@code skipped} describe what was actually written,
+	 * {@code truncated} tells the client whether newer history rows disappeared, and {@code detail}
+	 * carries the concrete reason when the answer is a refusal. The client never infers success from
+	 * anything else.
+	 */
+	public record RollbackResultDto(boolean success, long targetId, int activities, int restored, int skipped,
+			boolean truncated, String conflict, String message, String detail) {
+
+		public static RollbackResultDto notice(String key) {
+			return new RollbackResultDto(false, 0L, 0, 0, 0, false, "notice", key, "");
+		}
 	}
 
 	public record NoticeDto(String key, String detail) {
