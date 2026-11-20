@@ -51,8 +51,12 @@ public final class CtrlZServer {
 	private long lastAutosaveMillis;
 	private int suppressionDepth;
 	private final Map<UUID, Long> lastRollbackMillis = new ConcurrentHashMap<>();
-	/** Activities that just failed their state check, so pressing Z again moves on instead of looping. */
-	private final Map<Long, Integer> conflictedUntilTick = new java.util.concurrent.ConcurrentHashMap<>();
+	/**
+	 * Restore diagnostics, keyed by activity id. Deliberately separate from
+	 * {@link ActivityStatus}: a restore that failed because the world moved on must not turn the
+	 * record into a permanently different kind of record (AUDIT-003).
+	 */
+	private final Map<Long, String> diagnostics = new ConcurrentHashMap<>();
 	private final java.util.Set<UUID> rollbackInProgress = java.util.concurrent.ConcurrentHashMap.newKeySet();
 
 	private CtrlZServer(MinecraftServer server) {
@@ -325,6 +329,11 @@ public final class CtrlZServer {
 					store.appendConsequence(consequence);
 				}
 				record.setConsequenceCount(pendingConsequences.size());
+				if (record.notRollbackable()) {
+					// "Recording finished" and "can never be undone" are recorded together, so the
+					// boundary survives a restart.
+					record.setStatus(ActivityStatus.NOT_ROLLBACKABLE, record.notRollbackableReason());
+				}
 				store.seal(record);
 				store.flush(false);
 			} catch (IOException ignored) {
@@ -382,21 +391,23 @@ public final class CtrlZServer {
 		}
 	}
 
-	/** Marks an activity whose state check failed; the next rollback attempt skips it for a while. */
-	public void markConflicted(long activityId) {
-		conflictedUntilTick.put(activityId, currentTick() + 200);
+	/** Remembers why the last restore attempt stopped at this activity. Never changes its status. */
+	public void recordDiagnostic(long activityId, String reason) {
+		if (reason != null && !reason.isEmpty()) {
+			diagnostics.put(activityId, reason);
+		}
 	}
 
-	public boolean isConflicted(long activityId) {
-		Integer until = conflictedUntilTick.get(activityId);
-		if (until == null) {
-			return false;
+	public String diagnosticFor(long activityId) {
+		return diagnostics.getOrDefault(activityId, "");
+	}
+
+	/** Drops diagnostics that belong to records a successful restore removed. */
+	public void pruneDiagnostics() {
+		if (store == null) {
+			return;
 		}
-		if (currentTick() > until) {
-			conflictedUntilTick.remove(activityId);
-			return false;
-		}
-		return true;
+		diagnostics.keySet().removeIf(id -> store.byId(id) == null);
 	}
 
 	/** Re-entrancy guard: one rollback per player at a time, no matter how fast Z is pressed. */
@@ -487,6 +498,11 @@ public final class CtrlZServer {
 			return null;
 		}
 		int tick = currentTick();
+		// Storage that cannot be restored at all is a permanent boundary, and it is declared here,
+		// at recording time, not when somebody first tries to undo it.
+		if (kind == ConsequenceKind.CONTAINER_SLOTS && subject != null && subject.startsWith("unsupported#")) {
+			activity.markNotRollbackable("ctrlz.reason.unsupported");
+		}
 		if (activity.status() != ActivityStatus.RECORDING) {
 			// A late consequence (redstone, pistons, fluids) of an activity that is already sealed
 			// goes straight to disk; waiting for a seal that already happened would lose it.
@@ -495,6 +511,9 @@ public final class CtrlZServer {
 					System.currentTimeMillis(), detail);
 			try {
 				store.appendConsequence(late);
+				if (activity.notRollbackable() && activity.status() == ActivityStatus.SEALED) {
+					activity.setStatus(ActivityStatus.NOT_ROLLBACKABLE, activity.notRollbackableReason());
+				}
 				activity.setConsequenceCount(store.consequenceCount(activity.id()));
 				store.updateStatus(activity);
 			} catch (IOException e) {

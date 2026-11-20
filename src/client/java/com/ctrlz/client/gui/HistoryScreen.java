@@ -92,12 +92,14 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 		if (result != null) {
 			// ClientNet already re-fetched the list after a successful restore; this only surfaces the
 			// outcome. Patching the rows here would show a history the server no longer has.
-			lastResultKey = result.success() ? "" : result.message();
+			lastResultMessage = result.success() ? "" : result.message();
+			lastResultDetail = result.success() ? "" : result.detail();
 		}
 		rebuildWidgets();
 	}
 
-	private String lastResultKey = "";
+	private String lastResultMessage = "";
+	private String lastResultDetail = "";
 
 	@Override
 	public void extractRenderState(GuiGraphicsExtractor graphics, int mouseX, int mouseY, float partialTick) {
@@ -108,8 +110,13 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 				: Component.translatable("ctrlz.gui.summary", data.total(), data.storedActivities(),
 						data.backend()).getString();
 		graphics.text(this.font, header, 16, 34, 0xFFB0B0B0);
-		if (!lastResultKey.isEmpty()) {
-			graphics.text(this.font, Component.translatable(lastResultKey).getString(), 16, 46, 0xFFFF6B6B);
+		if (!lastResultMessage.isEmpty() || !lastResultDetail.isEmpty()) {
+			// The category alone is not actionable: show which record failed and why.
+			String text = lastResultMessage.isEmpty() ? "" : Component.translatable(lastResultMessage).getString();
+			if (!lastResultDetail.isEmpty()) {
+				text = text.isEmpty() ? lastResultDetail : text + " \u2014 " + lastResultDetail;
+			}
+			graphics.text(this.font, trim(text, Math.max(30, (this.width - 32) / 6)), 16, 46, 0xFFFF6B6B);
 		}
 		if (data != null && data.items().isEmpty()) {
 			graphics.text(this.font, Component.translatable("ctrlz.gui.empty").getString(), 16, 58, 0xFF909090);
@@ -119,11 +126,25 @@ public final class HistoryScreen extends Screen implements ClientNet.Refreshable
 				92, this.height - 22, 0xFF909090);
 	}
 
+	private static String trim(String text, int maxChars) {
+		return text.length() <= maxChars ? text : text.substring(0, Math.max(0, maxChars - 1)) + "\u2026";
+	}
+
 	private String rowLabel(Messages.ActivityDto activity) {
 		String time = TIME.format(Instant.ofEpochMilli(activity.startMillis()));
 		String distance = String.format("%.1f", activity.distance());
-		return time + "  " + activity.kind() + "  " + activity.x() + " " + activity.y() + " " + activity.z()
-				+ "  " + distance + "m  x" + activity.consequences() + "  " + statusLabel(activity.status());
+		String label = time + "  " + activity.kind() + "  " + activity.x() + " " + activity.y() + " "
+				+ activity.z() + "  " + distance + "m  x" + activity.consequences() + "  "
+				+ statusLabel(activity.status());
+		if (isBoundary(activity.status()) && !activity.reason().isEmpty()) {
+			// A history boundary is shown where it matters: on the row the undo will stop at.
+			label = label + "  [" + Component.translatable(activity.reason()).getString() + "]";
+		}
+		return label;
+	}
+
+	private static boolean isBoundary(String status) {
+		return "NOT_ROLLBACKABLE".equalsIgnoreCase(status) || "INCOMPLETE".equalsIgnoreCase(status);
 	}
 
 	private String statusLabel(String status) {

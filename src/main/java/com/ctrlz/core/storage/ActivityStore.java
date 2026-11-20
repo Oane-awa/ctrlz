@@ -195,8 +195,15 @@ public final class ActivityStore implements AutoCloseable {
 		rotateIfNeeded();
 	}
 
+	/**
+	 * Seals an activity. A status that was already decided before sealing (for example
+	 * {@link ActivityStatus#NOT_ROLLBACKABLE}) is preserved: "recording finished" and "can never be
+	 * undone" are two different facts and must not overwrite each other.
+	 */
 	public void seal(ActivityRecord record) throws IOException {
-		record.setStatus(ActivityStatus.SEALED, "");
+		if (record.status() == ActivityStatus.RECORDING) {
+			record.setStatus(ActivityStatus.SEALED, "");
+		}
 		activityWriter.append(new Record(RecordType.ACTIVITY_END, record.encode(false)));
 		record.clearDirty();
 		rotateIfNeeded();

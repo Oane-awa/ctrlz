@@ -89,14 +89,25 @@ public final class NetHandler {
 	private static void reply(ServerPlayNetworking.Context context, RollbackService.Result result) {
 		send(context, Messages.S2C_ROLLBACK_RESULT, new Messages.RollbackResultDto(result.success(),
 				result.targetActivityId(), result.activities(), result.restored(), result.skipped(),
-				result.truncated(), result.conflict(), result.messageKey(), result.detail()));
+				result.truncated(), result.conflict(), result.messageKey(), result.detail(), result.boundaryId(),
+				result.compensationFailed()));
 		ServerPlayer player = context.player();
 		if (result.success()) {
 			player.sendOverlayMessage(Component.translatable("ctrlz.notice.restored_to", result.activities(),
 					result.restored()));
-		} else {
-			player.sendOverlayMessage(Component.translatable(result.messageKey()));
+			return;
 		}
+		// A refusal must say what happened, not just "it failed": the key carries the category, the
+		// detail names the record and the state that did not match.
+		Component message = Component.translatable(result.messageKey());
+		if (!result.detail().isEmpty()) {
+			message = message.copy().append(Component.literal(" — " + shorten(result.detail(), 160)));
+		}
+		player.sendOverlayMessage(message);
+	}
+
+	private static String shorten(String text, int limit) {
+		return text.length() <= limit ? text : text.substring(0, Math.max(0, limit - 1)) + "\u2026";
 	}
 
 	private static String configJson() {

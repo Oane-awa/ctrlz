@@ -42,6 +42,13 @@ public final class ActivityRecord {
 	private ActivityStatus status = ActivityStatus.RECORDING;
 	private String statusReason = "";
 	private boolean dirty;
+	/**
+	 * Set when something this activity changed can never be restored (unsupported storage, no
+	 * usable snapshot). It is a permanent history boundary, not a runtime conflict: it becomes
+	 * {@link ActivityStatus#NOT_ROLLBACKABLE} when the activity is sealed and is persisted with it.
+	 */
+	private boolean notRollbackable;
+	private String notRollbackableReason = "";
 
 	public ActivityRecord(long id, UUID playerId, String playerName, ActivityKind kind, String dimension, int startTick,
 			long startMillis, long startPacked) {
@@ -166,6 +173,27 @@ public final class ActivityRecord {
 	public void bumpConsequences() {
 		consequenceCount++;
 		dirty = true;
+	}
+
+	/**
+	 * Declares a permanent history boundary. This is deliberately not the same thing as a restore
+	 * that failed once: a failed restore is a property of the attempt (kept as a diagnostic), while
+	 * this flag says the recorded change can never be inverted safely.
+	 */
+	public void markNotRollbackable(String reasonKey) {
+		if (!notRollbackable) {
+			notRollbackable = true;
+			notRollbackableReason = reasonKey == null ? "" : reasonKey;
+		}
+		dirty = true;
+	}
+
+	public boolean notRollbackable() {
+		return notRollbackable;
+	}
+
+	public String notRollbackableReason() {
+		return notRollbackableReason;
 	}
 
 	public int durationTicks() {

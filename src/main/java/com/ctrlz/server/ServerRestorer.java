@@ -3,6 +3,7 @@ package com.ctrlz.server;
 import com.ctrlz.core.consequence.ConsequenceRecord;
 import com.ctrlz.core.rollback.ConflictType;
 import com.ctrlz.core.rollback.ConsequenceRestorer;
+import com.ctrlz.core.rollback.RollbackPreflight;
 import com.ctrlz.core.util.ByteIO;
 import net.minecraft.core.BlockPos;
 import net.minecraft.server.MinecraftServer;
@@ -27,7 +28,7 @@ import java.util.UUID;
  * <p>Each {@code check} compares the world with the state the activity left behind, so a rollback
  * refuses to touch a block or slot that somebody else changed afterwards.
  */
-public final class ServerRestorer implements ConsequenceRestorer {
+public final class ServerRestorer implements ConsequenceRestorer, RollbackPreflight.StateReader {
 	private final MinecraftServer server;
 	/** Entities picked up by a consequence of the very rollback being executed. */
 	private final Set<String> pickedUpInBatch;
@@ -63,11 +64,164 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				case ITEM_ENTITY_SPAWN -> checkItemEntity(consequence);
 				case PLAYER_STATE -> checkPlayer(consequence);
 				case ENTITY_EFFECTS -> checkEffects(consequence);
+				case ENTITY_HEALTH -> checkHealth(consequence);
 				default -> ConflictType.NONE;
 			};
 		} catch (RuntimeException e) {
 			return ConflictType.STATE_MISMATCH;
 		}
+	}
+
+	/**
+	 * Payload sanity of one consequence, independent of the world.
+	 *
+	 * <p>Runs before the simulation so a corrupted record is reported as such instead of surfacing
+	 * as a mysterious state mismatch or, worse, being written as garbage.
+	 */
+	public ConflictType checkIntegrity(ConsequenceRecord consequence) {
+		try {
+			return switch (consequence.kind()) {
+				case BLOCK_STATE -> {
+					// A block state is always recorded, so an empty payload cannot be genuine.
+					if (consequence.before().length == 0 || consequence.after().length == 0) {
+						yield ConflictType.PAYLOAD_CORRUPT;
+					}
+					yield Snapshots.decodeBlockState(new String(consequence.before(), StandardCharsets.UTF_8)) == null
+							? ConflictType.PAYLOAD_CORRUPT : ConflictType.NONE;
+				}
+				case BLOCK_ENTITY_DATA -> consequence.before().length == 0
+						|| Snapshots.readTag(consequence.before()) == null ? ConflictType.PAYLOAD_CORRUPT
+								: ConflictType.NONE;
+				case CONTAINER_SLOTS, INVENTORY_SLOTS -> consequence.before().length == 0
+						? ConflictType.PAYLOAD_CORRUPT : ConflictType.NONE;
+				default -> ConflictType.NONE;
+			};
+		} catch (RuntimeException e) {
+			return ConflictType.PAYLOAD_CORRUPT;
+		}
+	}
+
+	// ------------------------------------------------------------------ read only state access
+
+	/**
+	 * Current state of one state object, encoded exactly like the recorded payloads so the
+	 * preflight can compare them byte for byte. Never writes anything.
+	 */
+	@Override
+	public byte[] readState(String key, ConsequenceRecord change) {
+		try {
+			if (change.kind() == com.ctrlz.core.consequence.ConsequenceKind.ITEM_ENTITY_SPAWN) {
+				Entity entity = entityFromSubject(change.subject());
+				if (!(entity instanceof ItemEntity item)) {
+					return null;
+				}
+				return Snapshots.encodeSingleItem(item.getItem(), item.level().registryAccess());
+			}
+			return readByKey(key);
+		} catch (RuntimeException e) {
+			return null;
+		}
+	}
+
+	@Override
+	public boolean stateExists(String key, ConsequenceRecord change) {
+		try {
+			return switch (change.kind()) {
+				case ITEM_ENTITY_SPAWN, ENTITY_HEALTH, ENTITY_EFFECTS -> entityFromSubject(change.subject()) != null;
+				case PLAYER_STATE -> playerFromSubject(change.subject()) != null;
+				case BLOCK_STATE, BLOCK_ENTITY_DATA -> level(change.dimension()) != null;
+				default -> true;
+			};
+		} catch (RuntimeException e) {
+			return false;
+		}
+	}
+
+	/**
+	 * Reads a state object by its preflight key ({@code block|dim|pos}, {@code slot|dim|pos|subject},
+	 * {@code entity|uuid}). Used for the post restore verification, where only the key is left.
+	 */
+	public byte[] readByKey(String key) {
+		if (key == null) {
+			return null;
+		}
+		String[] parts = key.split("\\|", 4);
+		if (parts.length < 2) {
+			return null;
+		}
+		try {
+			return switch (parts[0]) {
+				case "block" -> {
+					ServerLevel serverLevel = parts.length > 2 ? level(parts[1]) : null;
+					if (serverLevel == null) {
+						yield null;
+					}
+					BlockPos pos = posOf(Long.parseLong(parts[2]));
+					yield Snapshots.encodeBlockState(serverLevel.getBlockState(pos))
+							.getBytes(StandardCharsets.UTF_8);
+				}
+				case "slot" -> parts.length > 3 ? readSlot(parts[1], parts[2], parts[3]) : null;
+				case "entity" -> findEntity(parts[1]) == null ? new byte[] { 0 } : new byte[] { 1 };
+				default -> null;
+			};
+		} catch (RuntimeException e) {
+			return null;
+		}
+	}
+
+	private byte[] readSlot(String dimension, String packedPos, String subject) {
+		if (subject.startsWith("unsupported#")) {
+			return null;
+		}
+		if (subject.startsWith("ender#")) {
+			ServerPlayer player = playerFromSubject(subject);
+			return player == null ? null
+					: readSlot(player.getEnderChestInventory(), slotIndex(subject), player.level());
+		}
+		if (subject.startsWith("inv#")) {
+			ServerPlayer player = playerFromSubject(subject);
+			return player == null ? null : readSlot(player.getInventory(), slotIndex(subject), player.level());
+		}
+		ServerLevel level = level(dimension);
+		if (level == null) {
+			return null;
+		}
+		if (!(level.getBlockEntity(posOf(Long.parseLong(packedPos))) instanceof Container container)) {
+			return null;
+		}
+		return readSlot(container, slotIndex(subject), level);
+	}
+
+	private byte[] readSlot(Container container, int slot, net.minecraft.world.level.Level level) {
+		if (slot < 0 || slot >= container.getContainerSize()) {
+			return null;
+		}
+		return Snapshots.encodeSingleItem(container.getItem(slot), level.registryAccess());
+	}
+
+	private static BlockPos posOf(long packed) {
+		return new BlockPos(ByteIO.unpackX(packed), ByteIO.unpackY(packed), ByteIO.unpackZ(packed));
+	}
+
+	/** Resolves {@code <uuid>}, {@code entity#<uuid>} and {@code player#<uuid>} subject forms. */
+	private Entity entityFromSubject(String subject) {
+		if (subject == null || subject.isEmpty()) {
+			return null;
+		}
+		String[] parts = subject.split("#");
+		if (parts.length >= 2) {
+			if ("player".equals(parts[0])) {
+				return playerFromSubject(subject);
+			}
+			return findEntity(parts[1]);
+		}
+		return findEntity(subject);
+	}
+
+	private ConflictType checkHealth(ConsequenceRecord consequence) {
+		// A dead or unloaded target cannot be "restored": reporting success there would be a lie.
+		return entityFromSubject(consequence.subject()) instanceof LivingEntity ? ConflictType.NONE
+				: ConflictType.TARGET_MISSING;
 	}
 
 	private ConflictType checkBlock(ConsequenceRecord consequence) {
@@ -95,7 +249,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 				return ConflictType.TARGET_MISSING;
 			}
 			return slotMatches(player.getEnderChestInventory(), slotIndex(subject), consequence, player.level())
-					? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+					? ConflictType.NONE : ConflictType.ITEM_MISMATCH;
 		}
 		ServerLevel level = level(consequence.dimension());
 		if (level == null || !consequence.hasPosition()
@@ -103,7 +257,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 			return ConflictType.TARGET_MISSING;
 		}
 		return slotMatches(container, slotIndex(subject), consequence, level) ? ConflictType.NONE
-				: ConflictType.STATE_MISMATCH;
+				: ConflictType.ITEM_MISMATCH;
 	}
 
 	private ConflictType checkInventory(ConsequenceRecord consequence) {
@@ -112,7 +266,7 @@ public final class ServerRestorer implements ConsequenceRestorer {
 			return ConflictType.TARGET_MISSING;
 		}
 		return slotMatches(player.getInventory(), slotIndex(consequence.subject()), consequence, player.level())
-				? ConflictType.NONE : ConflictType.STATE_MISMATCH;
+				? ConflictType.NONE : ConflictType.ITEM_MISMATCH;
 	}
 
 	private boolean slotMatches(Container container, int slot, ConsequenceRecord consequence,

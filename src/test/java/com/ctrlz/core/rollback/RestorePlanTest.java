@@ -8,6 +8,7 @@ import java.util.List;
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
@@ -57,14 +58,27 @@ class RestorePlanTest {
 	}
 
 	@Test
-	void unrestorableAndAlreadyUndoneRecordsAreNotUndoneAgain() {
+	void alreadyUndoneAndPrunedRecordsDoNotBlockAnything() {
 		List<RestorePlan.Node> nodes = List.of(
 				new RestorePlan.Node(1L, ALICE, ActivityStatus.SEALED, false),
 				new RestorePlan.Node(2L, ALICE, ActivityStatus.ROLLED_BACK, false),
-				new RestorePlan.Node(3L, ALICE, ActivityStatus.NOT_ROLLBACKABLE, false),
-				new RestorePlan.Node(4L, ALICE, ActivityStatus.INCOMPLETE, false),
-				new RestorePlan.Node(5L, ALICE, ActivityStatus.SEALED, false));
-		assertEquals(List.of(5L), RestorePlan.victims(nodes, 1L, ALICE, true));
+				new RestorePlan.Node(3L, ALICE, ActivityStatus.PRUNED, false),
+				new RestorePlan.Node(4L, ALICE, ActivityStatus.SEALED, false));
+		// Records whose effects are already gone need no state change and must not stop the branch.
+		assertEquals(List.of(4L), RestorePlan.victims(nodes, 1L, ALICE, true));
+	}
+
+	@Test
+	void anUnrestorableRecordIsABoundaryRatherThanBeingSkipped() {
+		List<RestorePlan.Node> nodes = List.of(
+				new RestorePlan.Node(1L, ALICE, ActivityStatus.SEALED, false),
+				new RestorePlan.Node(2L, ALICE, ActivityStatus.SEALED, false),
+				new RestorePlan.Node(3L, ALICE, ActivityStatus.NOT_ROLLBACKABLE, false));
+		// Skipping the record would apply older snapshots on top of a change that stays in place.
+		RestorePlan.Branch branch = RestorePlan.branch(nodes, 1L, ALICE, true, null);
+		assertTrue(branch.blocked());
+		assertEquals(3L, branch.boundary().id());
+		assertTrue(branch.victims().isEmpty());
 	}
 
 	@Test
@@ -82,5 +96,54 @@ class RestorePlanTest {
 	void anEmptyResultIsStable() {
 		assertTrue(RestorePlan.victims(null, 1L, ALICE, true).isEmpty());
 		assertTrue(RestorePlan.victims(List.of(), 1L, ALICE, true).isEmpty());
+	}
+
+	@Test
+	void aBoundaryStopsTheBranchInsteadOfBeingSkipped() {
+		List<RestorePlan.Node> nodes = new ArrayList<>(chain(ALICE, 1, 3));
+		nodes.add(new RestorePlan.Node(4L, ALICE, ActivityStatus.NOT_ROLLBACKABLE, false));
+		nodes.add(new RestorePlan.Node(5L, ALICE, ActivityStatus.SEALED, false));
+
+		RestorePlan.Branch branch = RestorePlan.branch(nodes, 1L, ALICE, true, null);
+
+		assertTrue(branch.blocked(), "a restore must not cross a record that can never be undone");
+		assertEquals(4L, branch.boundary().id());
+		assertTrue(branch.victims().isEmpty(), "nothing may be undone when the branch is blocked");
+	}
+
+	@Test
+	void recordsNewerThanABoundaryCanStillBeUndone() {
+		List<RestorePlan.Node> nodes = new ArrayList<>(chain(ALICE, 1, 3));
+		nodes.add(new RestorePlan.Node(4L, ALICE, ActivityStatus.NOT_ROLLBACKABLE, false));
+		nodes.add(new RestorePlan.Node(5L, ALICE, ActivityStatus.SEALED, false));
+
+		RestorePlan.Branch branch = RestorePlan.branch(nodes, 4L, ALICE, true, null);
+
+		assertFalse(branch.blocked(), "restoring to the state after the boundary is legal");
+		assertEquals(List.of(5L), branch.victims());
+	}
+
+	@Test
+	void anIncompleteRecordIsABoundaryToo() {
+		List<RestorePlan.Node> nodes = new ArrayList<>(chain(ALICE, 1, 2));
+		nodes.add(new RestorePlan.Node(3L, ALICE, ActivityStatus.INCOMPLETE, false));
+
+		RestorePlan.Branch branch = RestorePlan.branch(nodes, 1L, ALICE, true, null);
+
+		assertTrue(branch.blocked());
+		assertEquals(3L, branch.boundary().id());
+		assertEquals("ctrlz.reason.incomplete", branch.boundary().reasonKey());
+	}
+
+	@Test
+	void unrecoverableContentIsABoundaryEvenWithoutTheStatus() {
+		// History written by an older version has status SEALED but carries an unsupported change.
+		List<RestorePlan.Node> nodes = new ArrayList<>(chain(ALICE, 1, 2));
+
+		RestorePlan.Branch branch = RestorePlan.branch(nodes, 1L, ALICE, true, id -> id == 2L);
+
+		assertTrue(branch.blocked());
+		assertEquals(2L, branch.boundary().id());
+		assertEquals("ctrlz.reason.unsupported", branch.boundary().reasonKey());
 	}
 }

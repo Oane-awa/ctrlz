@@ -53,7 +53,8 @@ public final class Messages {
 			String detail, String status) {
 	}
 
-	public record DetailDto(ActivityDto activity, List<TraceDto> trace, List<ConsequenceDto> consequences) {
+	public record DetailDto(ActivityDto activity, List<TraceDto> trace, List<ConsequenceDto> consequences,
+			String lastFailure) {
 	}
 
 	public record RollbackRequestDto(long activityId, boolean rollbackLast) {
@@ -63,15 +64,23 @@ public final class Messages {
 	 * The single answer shape of a restore, shared by the GUI row click and the Z hotkey.
 	 *
 	 * <p>{@code activities} / {@code restored} / {@code skipped} describe what was actually written,
-	 * {@code truncated} tells the client whether newer history rows disappeared, and {@code detail}
-	 * carries the concrete reason when the answer is a refusal. The client never infers success from
-	 * anything else.
+	 * {@code truncated} tells the client whether newer history rows disappeared, {@code detail}
+	 * carries the concrete reason (which record, what was expected, what was found),
+	 * {@code boundaryId} is the permanent history boundary the restore stopped at, and
+	 * {@code compensationFailed} warns that a failed restore could not be rolled back either. The
+	 * client never infers success from anything else.
 	 */
 	public record RollbackResultDto(boolean success, long targetId, int activities, int restored, int skipped,
-			boolean truncated, String conflict, String message, String detail) {
+			boolean truncated, String conflict, String message, String detail, long boundaryId,
+			boolean compensationFailed) {
+
+		public RollbackResultDto(boolean success, long targetId, int activities, int restored, int skipped,
+				boolean truncated, String conflict, String message, String detail) {
+			this(success, targetId, activities, restored, skipped, truncated, conflict, message, detail, 0L, false);
+		}
 
 		public static RollbackResultDto notice(String key) {
-			return new RollbackResultDto(false, 0L, 0, 0, 0, false, "notice", key, "");
+			return new RollbackResultDto(false, 0L, 0, 0, 0, false, "notice", key, "", 0L, false);
 		}
 	}
 

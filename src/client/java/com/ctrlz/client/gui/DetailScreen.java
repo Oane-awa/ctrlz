@@ -56,6 +56,10 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 		rebuildWidgets();
 	}
 
+	private static String trim(String text, int maxChars) {
+		return text.length() <= maxChars ? text : text.substring(0, Math.max(0, maxChars - 1)) + "\u2026";
+	}
+
 	@Override
 	public void onDataChanged() {
 		Messages.RollbackResultDto result = ClientNet.lastResult();
@@ -85,10 +89,16 @@ public final class DetailScreen extends Screen implements ClientNet.Refreshable 
 		if (!activity.reason().isEmpty()) {
 			graphics.text(this.font, Component.translatable(activity.reason()).getString(), 16, 58, 0xFFFF6B6B);
 		}
+		if (detail.lastFailure() != null && !detail.lastFailure().isEmpty()) {
+			// Why the last restore attempt stopped here: a record id, the state it expected and the
+			// state it found.
+			graphics.text(this.font, trim(Component.translatable("ctrlz.gui.last_failure").getString() + " "
+					+ detail.lastFailure(), Math.max(30, (this.width - 32) / 6)), 16, 68, 0xFFFFB86B);
+		}
 		graphics.text(this.font, Component.translatable("ctrlz.gui.trace_points", detail.trace().size()).getString(),
-				16, 72, 0xFF909090);
+				16, 80, 0xFF909090);
 		List<Messages.ConsequenceDto> consequences = detail.consequences();
-		int top = 88;
+		int top = 96;
 		for (int i = offset; i < Math.min(consequences.size(), offset + PAGE); i++) {
 			Messages.ConsequenceDto consequence = consequences.get(i);
 			String line = consequence.origin() + "  " + consequence.kind() + "  " + consequence.detail();

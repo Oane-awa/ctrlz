@@ -60,7 +60,7 @@ public final class HistoryService {
 					consequence.origin().name(), consequence.tick(), x, y, z, consequence.subject(),
 					consequence.detail(), consequence.status().name()));
 		}
-		return new Messages.DetailDto(toDto(activity), trace, consequences);
+		return new Messages.DetailDto(toDto(activity), trace, consequences, hub.diagnosticFor(activityId));
 	}
 
 	private static List<ActivityRecord> filter(List<ActivityRecord> all, Messages.QueryDto query) {

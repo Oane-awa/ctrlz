@@ -153,6 +153,32 @@ class ActivityStoreTest {
 	}
 
 	@Test
+	void aNotRollbackableStatusSurvivesARestart() throws IOException {
+		UUID player = UUID.randomUUID();
+		Path root = tempDir.resolve("boundary");
+		long id;
+		try (ActivityStore store = new ActivityStore(root, ActivityStore.Limits.defaults())) {
+			store.open();
+			ActivityRecord activity = newActivity(store.allocateActivityId(), player);
+			// Exactly what CtrlZServer does for an unsupported change before sealing.
+			activity.setStatus(ActivityStatus.NOT_ROLLBACKABLE, "ctrlz.reason.unsupported");
+			store.begin(activity);
+			store.seal(activity);
+			store.flush(true);
+			id = activity.id();
+			assertEquals(ActivityStatus.NOT_ROLLBACKABLE, activity.status(),
+					"sealing must not overwrite the reason it was marked with");
+		}
+		try (ActivityStore reopened = new ActivityStore(root, ActivityStore.Limits.defaults())) {
+			reopened.open();
+			ActivityRecord loaded = reopened.byId(id);
+			assertNotNull(loaded, "a history boundary must survive the restart");
+			assertEquals(ActivityStatus.NOT_ROLLBACKABLE, loaded.status());
+			assertEquals("ctrlz.reason.unsupported", loaded.statusReason());
+		}
+	}
+
+	@Test
 	void retentionKeepsHistoryInsideLimits() throws IOException {
 		Path root = tempDir.resolve("retention");
 		ActivityStore.Limits small = new ActivityStore.Limits(2, 0L, 512L, 200);

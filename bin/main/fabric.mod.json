@@ -21,7 +21,8 @@
     "fabric-gametest": [
       "com.ctrlz.gametest.PipelineGameTest",
       "com.ctrlz.gametest.Slice0GameTest",
-      "com.ctrlz.gametest.EffectsGameTest"
+      "com.ctrlz.gametest.EffectsGameTest",
+      "com.ctrlz.gametest.RollbackBoundaryGameTest"
     ]
   },
   "mixins": [
